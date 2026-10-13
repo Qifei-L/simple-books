@@ -108,7 +108,7 @@ class Manager(IntegerIDMixin, BaseUserManager[User, int]):
     async def validate_password(self, password, user):
         if len(password) < 12:
             from fastapi_users.exceptions import InvalidPasswordException
-            raise InvalidPasswordException(reason="密码至少 12 个字符")
+            raise InvalidPasswordException(reason="The password must contain at least 12 characters.")
 
 async def get_manager():
     yield Manager(UserDB())
@@ -124,10 +124,10 @@ current_user = fastapi_users.current_user(active=True)
 
 def writer(user: User = Depends(current_user)):
     if user.role not in ("Admin", "Accountant"):
-        raise HTTPException(403, "只读用户不能修改账务")
+        raise HTTPException(403, "Read-only users cannot modify accounting records.")
     return user
 
 def admin(user: User = Depends(current_user)):
     if user.role != "Admin":
-        raise HTTPException(403, "需要管理员角色")
+        raise HTTPException(403, "Administrator role required.")
     return user

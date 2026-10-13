@@ -110,7 +110,7 @@ attempts = defaultdict(deque)
 async def security(request: Request, call_next):
     if request.method not in ("GET", "HEAD", "OPTIONS"):
         if request.headers.get("X-Requested-With") != "SimpleBooks":
-            return JSONResponse({"detail": "缺少请求校验头"}, 403)
+            return JSONResponse({"detail": "Missing request verification header."}, 403)
     if request.url.path == "/api/auth/login" and request.method == "POST":
         key = request.client.host
         now = time.monotonic()
@@ -118,7 +118,7 @@ async def security(request: Request, call_next):
         while q and q[0] < now - 60:
             q.popleft()
         if len(q) >= 20:
-            return JSONResponse({"detail": "登录尝试过多，请一分钟后重试"}, 429)
+            return JSONResponse({"detail": "Too many sign-in attempts. Try again in one minute."}, 429)
         q.append(now)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -130,7 +130,7 @@ async def security(request: Request, call_next):
 
 @app.exception_handler(IntegrityError)
 async def conflict(request, exc):
-    return JSONResponse({"detail": "记录已存在或提交发生冲突，请刷新后重试"}, 409)
+    return JSONResponse({"detail": "The record already exists or the request conflicts. Refresh and try again."}, 409)
 
 @app.exception_handler(Exception)
 async def library_error(request, exc):
@@ -138,7 +138,7 @@ async def library_error(request, exc):
         return JSONResponse({"detail": str(exc) or exc.__class__.__name__}, 422)
     import logging
     logging.getLogger(__name__).exception("Request failed")
-    return JSONResponse({"detail": "服务器处理失败，请查看服务器日志"}, 500)
+    return JSONResponse({"detail": "The server could not process the request. Check the server logs."}, 500)
 
 app.include_router(fastapi_users.get_auth_router(auth_backend), prefix="/api/auth", tags=["Auth"])
 # No public registration or self-service role fields.
@@ -155,7 +155,7 @@ async def change_password(data: PasswordChange, user: User = Depends(current_use
     manager = Manager(UserDB())
     verified, _ = manager.password_helper.verify_and_update(data.current_password, user.hashed_password)
     if not verified:
-        raise HTTPException(400, "当前密码不正确")
+        raise HTTPException(400, "The current password is incorrect.")
     await manager.update(UserUpdate(password=data.password), user, safe=True)
     with engine.begin() as c:
         c.execute(delete(tokens).where(tokens.c.user_id == user.id))
@@ -185,7 +185,7 @@ def accounts(user: User = Depends(current_user)):
 def add_account(data: NewAccount, user: User = Depends(writer)):
     with books.session(write=True) as s:
         if s.scalars(select(Account).where(Account.name == data.name.title())).first():
-            raise HTTPException(409, "科目名称已存在")
+            raise HTTPException(409, "An account with this name already exists.")
         a = Account(name=data.name, account_type=Account.AccountType[data.account_type],
                     currency_id=s.entity.currency_id, entity_id=s.entity.id)
         s.add(a)
@@ -207,7 +207,7 @@ def transactions(start: date | None = None, end: date | None = None,
 @app.get("/api/accounts/{id}/statement")
 def statement(id: int, start: date, end: date, user: User = Depends(current_user)):
     if start > end or start.year != end.year:
-        raise HTTPException(422, "请选择同一自然年内的区间")
+        raise HTTPException(422, "Select a date range within one calendar year.")
     with books.session() as s:
         a = books.get_account(s, id)
         result = a.statement(s, datetime.combine(start, datetime.min.time()), datetime.combine(end, datetime.max.time()))
@@ -225,7 +225,7 @@ def reverse(id: int, data: Reversal, key: Key, user: User = Depends(writer)):
 @app.post("/api/documents")
 def document(data: Document, key: Key, user: User = Depends(writer)):
     if data.due_date and data.due_date < data.date:
-        raise HTTPException(422, "到期日不能早于单据日期")
+        raise HTTPException(422, "The due date cannot precede the document date.")
     return books.create_document(data.model_dump(), key, user.id)
 
 @app.post("/api/assignments")
@@ -275,7 +275,7 @@ def list_users(user: User = Depends(admin)):
 async def create_user(data: NewUser, user: User = Depends(admin)):
     db = UserDB()
     if await db.get_by_email(str(data.email)):
-        raise HTTPException(409, "邮箱已存在")
+        raise HTTPException(409, "This email address already exists.")
     u = await Manager(db).create(UserCreate(email=data.email, password=data.password), safe=True)
     u = await db.update(u, {"role": data.role})
     with engine.begin() as c:
@@ -285,10 +285,10 @@ async def create_user(data: NewUser, user: User = Depends(admin)):
 @app.patch("/api/admin/users/{id}")
 def change_role(id: int, data: RoleChange, user: User = Depends(admin)):
     if id == user.id:
-        raise HTTPException(422, "请由另一位管理员修改自己的角色或状态")
+        raise HTTPException(422, "Ask another administrator to change your role or status.")
     with engine.begin() as c:
         if not c.execute(select(users.c.id).where(users.c.id == id)).first():
-            raise HTTPException(404, "用户不存在")
+            raise HTTPException(404, "User not found.")
         c.execute(update(users).where(users.c.id == id).values(**data.model_dump()))
         c.execute(delete(tokens).where(tokens.c.user_id == id))
         books.audit_event(c, user.id, "change_role", {"user_id": id, **data.model_dump()})

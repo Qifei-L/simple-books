@@ -53,7 +53,7 @@ def session(write=False):
             q = q.with_for_update()
         entity = s.scalars(q).first()
         if entity is None:
-            raise HTTPException(503, "账套尚未初始化")
+            raise HTTPException(503, "The company has not been initialized.")
         s.entity = entity
         try:
             yield s
@@ -67,7 +67,7 @@ def session(write=False):
 def get_account(s, id):
     a = s.get(Account, id)
     if not a or a.entity_id != s.entity.id:
-        raise HTTPException(404, "科目不存在")
+        raise HTTPException(404, "Account not found.")
     return a
 
 def account_json(s, a):
@@ -98,7 +98,7 @@ def reserve(s, key, payload, kind, user_id, due=None, related=None):
     row = s.connection().execute(select(operations).where(operations.c.request_key == key)).mappings().first()
     if row:
         if row["payload_hash"] != digest:
-            raise HTTPException(409, "同一个提交编号不能用于不同内容")
+            raise HTTPException(409, "An idempotency key cannot be reused for different content.")
         return row, True
     id = s.connection().execute(insert(operations).values(request_key=key, payload_hash=digest,
         kind=kind, actor_id=user_id, due_date=due, related_id=related,
@@ -113,14 +113,14 @@ def finish(s, op, t, user_id):
 def post_journal(s, data):
     entries = data["lines"]
     if sum(Decimal(str(x["debit"])) for x in entries) != sum(Decimal(str(x["credit"])) for x in entries):
-        raise HTTPException(422, "借贷合计必须相等")
+        raise HTTPException(422, "Total debits and credits must be equal.")
     if len({x["account_id"] for x in entries}) != len(entries):
-        raise HTTPException(422, "每个科目只能出现一次，请先合并金额")
+        raise HTTPException(422, "Each account may appear only once. Combine its amounts first.")
     main = entries[0]
     for x in entries:
         get_account(s, x["account_id"])
         if (Decimal(str(x["debit"])) > 0) == (Decimal(str(x["credit"])) > 0):
-            raise HTTPException(422, "每行只能填写借方或贷方金额")
+            raise HTTPException(422, "Enter either a debit or a credit amount on each line.")
     t = JournalEntry(narration=data["description"], reference=data["reference"],
         transaction_date=datetime.combine(data["date"], time(12)), account_id=main["account_id"],
         credited=Decimal(str(main["credit"])) > 0, compound=True,
@@ -151,7 +151,7 @@ def create_document(data, key, user_id):
                "receipt": ClientReceipt, "payment": SupplierPayment}
     with session(write=True) as s:
         if sum(x["amount"] * x["quantity"] for x in data["lines"]) > Decimal("999999999.99"):
-            raise HTTPException(422, "单据金额超过第一版支持范围")
+            raise HTTPException(422, "The document amount exceeds the supported limit.")
         op, existing = reserve(s, key, data, data["kind"], user_id,
             data["due_date"].isoformat() if data.get("due_date") else None)
         if existing:
@@ -181,13 +181,13 @@ def reverse_journal(id, data, key, user_id):
         original_op = s.connection().execute(select(operations).where(
             operations.c.transaction_id == id, operations.c.kind == "journal")).first()
         if not original_op:
-            raise HTTPException(422, "第一版只支持普通日记账冲销")
+            raise HTTPException(422, "Only standard journal entries can be reversed in this version.")
         if s.connection().execute(select(operations.c.id).where(
             operations.c.related_id == id, operations.c.kind == "reversal", operations.c.id != op["id"])).first():
-            raise HTTPException(409, "该日记账已冲销")
+            raise HTTPException(409, "This journal entry has already been reversed.")
         original = s.get(Transaction, id)
         if data["date"] < original.transaction_date.date():
-            raise HTTPException(422, "冲销日期不能早于原交易")
+            raise HTTPException(422, "The reversal date cannot precede the original transaction.")
         lines = [dict(account_id=original.account_id,
             debit=original.main_account_amount if original.credited else 0,
             credit=0 if original.credited else original.main_account_amount)]
@@ -205,12 +205,12 @@ def assign(data, key, user_id):
             payment = s.get(Transaction, data["payment_id"])
             doc = s.get(Transaction, data["document_id"])
             if not payment or not doc:
-                raise HTTPException(404, "单据不存在")
+                raise HTTPException(404, "Document not found.")
             if (payment.transaction_type.name, doc.transaction_type.name) not in (
                     ("CLIENT_RECEIPT", "CLIENT_INVOICE"), ("SUPPLIER_PAYMENT", "SUPPLIER_BILL")):
-                raise HTTPException(422, "只能用客户收款核销发票，或供应商付款核销账单")
+                raise HTTPException(422, "Allocate customer receipts to invoices or supplier payments to bills.")
             if data["date"] < max(payment.transaction_date.date(), doc.transaction_date.date()):
-                raise HTTPException(422, "核销日期不能早于单据日期")
+                raise HTTPException(422, "The allocation date cannot precede either document.")
             a = Assignment(assignment_date=datetime.combine(data["date"], time(18)),
                 transaction_id=payment.id, assigned_id=doc.id, assigned_type=doc.__class__.__name__,
                 amount=data["amount"], entity_id=s.entity.id)
@@ -226,7 +226,7 @@ def suspense(data, key, user_id):
             return transaction_json(s, s.get(Transaction, op["transaction_id"]))
         bank = get_account(s, data["bank_id"])
         if bank.account_type.name != "BANK":
-            raise HTTPException(422, "请选择银行科目")
+            raise HTTPException(422, "Select a bank account.")
         pending = s.scalars(select(Account).where(Account.name == "Suspense")).first()
         t = post_journal(s, dict(date=data["date"], description=data["description"], reference=data["reference"],
             lines=[dict(account_id=bank.id, debit=data["amount"], credit=0),
@@ -242,16 +242,16 @@ def resolve_suspense(id, data, key, user_id):
         original = s.connection().execute(select(operations).where(
             operations.c.transaction_id == id, operations.c.kind == "suspense")).mappings().first()
         if not original:
-            raise HTTPException(404, "待处理交易不存在")
+            raise HTTPException(404, "Unclassified deposit not found.")
         if original["resolved"]:
-            raise HTTPException(409, "该交易已分类")
+            raise HTTPException(409, "This deposit has already been classified.")
         t0 = s.get(Transaction, id)
         target = get_account(s, data["account_id"])
         pending_id = next(l.account_id for l in t0.line_items if l.credited)
         if target.id == pending_id or target.id == t0.account_id:
-            raise HTTPException(422, "请选择实际分类科目")
+            raise HTTPException(422, "Select the appropriate target account.")
         if data["date"] < t0.transaction_date.date():
-            raise HTTPException(422, "分类日期不能早于原交易")
+            raise HTTPException(422, "The classification date cannot precede the original transaction.")
         t = post_journal(s, dict(date=data["date"], description=data["description"],
             reference=f"CLASSIFY-{id}", lines=[dict(account_id=pending_id, debit=t0.amount, credit=0),
                 dict(account_id=target.id, debit=0, credit=t0.amount)]))
@@ -260,7 +260,7 @@ def resolve_suspense(id, data, key, user_id):
 
 def report(name, start, end):
     if start > end or start.year != end.year:
-        raise HTTPException(422, "第一版报表请选同一自然年内的日期区间")
+        raise HTTPException(422, "Select a date range within one calendar year for this version.")
     with session() as s:
         d0, d1 = datetime.combine(start, time.min), datetime.combine(end, time.max)
         cls = {"income": IncomeStatement, "balance": BalanceSheet,

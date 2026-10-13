@@ -4,7 +4,7 @@ import { AuthPage, ErrorComponent, ThemedLayout, RefineThemes, useNotificationPr
 import routerProvider, { CatchAllNavigate, NavigateToResource, DocumentTitleHandler } from "@refinedev/react-router";
 import { BrowserRouter, Route, Routes, Outlet } from "react-router";
 import { App as AntdApp, ConfigProvider } from "antd";
-import zhCN from "antd/locale/zh_CN";
+import enUS from "antd/locale/en_US";
 import { DashboardOutlined, BankOutlined, SwapOutlined, FileTextOutlined, QuestionCircleOutlined, TeamOutlined } from "@ant-design/icons";
 import "@ant-design/v5-patch-for-react-19";
 import "@refinedev/antd/dist/reset.css";
@@ -13,7 +13,7 @@ import { Dashboard, Accounts, Transactions, Pending, Reports, Users, Password } 
 import "./style.css";
 
 export default function App() {
-  return <BrowserRouter><ConfigProvider locale={zhCN} theme={{ ...RefineThemes.Blue,
+  return <BrowserRouter><ConfigProvider locale={enUS} theme={{ ...RefineThemes.Blue,
     token: { ...RefineThemes.Blue.token, colorPrimary: "#2563eb", borderRadius: 8 } }}><AntdApp>
     <Refine authProvider={authProvider} dataProvider={dataProvider} routerProvider={routerProvider}
       notificationProvider={useNotificationProvider}
@@ -22,13 +22,13 @@ export default function App() {
         return { can: resource?.startsWith("admin/") ? role === "Admin" : action === "list" || action === "show" || role !== "Viewer" };
       } }}
       resources={[
-        { name: "dashboard", list: "/", meta: { label: "概览", icon: <DashboardOutlined /> } },
-        { name: "accounts", list: "/accounts", meta: { label: "科目与账户", icon: <BankOutlined /> } },
-        { name: "transactions", list: "/transactions", meta: { label: "交易与发票", icon: <SwapOutlined /> } },
-        { name: "pending", list: "/pending", meta: { label: "未知入账", icon: <QuestionCircleOutlined /> } },
-        { name: "reports", list: "/reports", meta: { label: "财务报表", icon: <FileTextOutlined /> } },
-        { name: "admin/users", list: "/users", meta: { label: "用户与角色", icon: <TeamOutlined /> } },
-        { name: "password", list: "/password", meta: { label: "修改密码" } },
+        { name: "dashboard", list: "/", meta: { label: "Overview", icon: <DashboardOutlined /> } },
+        { name: "accounts", list: "/accounts", meta: { label: "Chart of Accounts", icon: <BankOutlined /> } },
+        { name: "transactions", list: "/transactions", meta: { label: "Transactions & Invoices", icon: <SwapOutlined /> } },
+        { name: "pending", list: "/pending", meta: { label: "Unclassified Deposits", icon: <QuestionCircleOutlined /> } },
+        { name: "reports", list: "/reports", meta: { label: "Financial Reports", icon: <FileTextOutlined /> } },
+        { name: "admin/users", list: "/users", meta: { label: "Users & Roles", icon: <TeamOutlined /> } },
+        { name: "password", list: "/password", meta: { label: "Change Password" } },
       ]} options={{ syncWithLocation: true }}>
       <Routes>
         <Route element={<Authenticated key="protected" fallback={<CatchAllNavigate to="/login" />}>

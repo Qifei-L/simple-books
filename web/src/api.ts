@@ -7,7 +7,7 @@ export async function api(path: string, options: RequestInit = {}) {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw { message: typeof body.detail === "string" ? body.detail : "请求失败，请检查输入", statusCode: response.status };
+    throw { message: typeof body.detail === "string" ? body.detail : "Request failed. Please check your input.", statusCode: response.status };
   }
   return response.status === 204 ? null : response.json();
 }
@@ -18,9 +18,9 @@ export const authProvider: AuthProvider = {
       const r = await fetch("/api/auth/login", { method: "POST", credentials: "same-origin",
         headers: { "Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "SimpleBooks" },
         body: new URLSearchParams({ username: email, password }) });
-      if (!r.ok) throw new Error("邮箱或密码不正确，或登录尝试过多");
+      if (!r.ok) throw new Error("Invalid email or password, or too many login attempts.");
       return { success: true, redirectTo: "/" };
-    } catch (e) { return { success: false, error: { name: "登录失败", message: (e as Error).message } }; }
+    } catch (e) { return { success: false, error: { name: "Sign-in failed", message: (e as Error).message } }; }
   },
   logout: async () => { await api("auth/logout", { method: "POST" }); return { success: true, redirectTo: "/login" }; },
   check: async () => {
@@ -48,6 +48,6 @@ export const dataProvider: DataProvider = {
   },
   create: async ({ resource, variables }) => ({ data: await api(resource, { method: "POST", body: JSON.stringify(variables) }) }),
   update: async ({ resource, id, variables }) => ({ data: await api(`${resource}/${id}`, { method: "PATCH", body: JSON.stringify(variables) }) }),
-  deleteOne: async () => { throw new Error("账务记录不能直接删除"); },
+  deleteOne: async () => { throw new Error("Posted accounting records cannot be deleted directly."); },
   getApiUrl: () => "/api",
 };
