@@ -2,14 +2,14 @@
 import { Authenticated, Refine } from "@refinedev/core";
 import { AuthPage, ErrorComponent, ThemedLayout, RefineThemes, useNotificationProvider } from "@refinedev/antd";
 import routerProvider, { CatchAllNavigate, NavigateToResource, DocumentTitleHandler } from "@refinedev/react-router";
-import { BrowserRouter, Route, Routes, Outlet } from "react-router";
+import { BrowserRouter, Route, Routes, Outlet, Navigate } from "react-router";
 import { App as AntdApp, ConfigProvider } from "antd";
 import enUS from "antd/locale/en_US";
-import { DashboardOutlined, BankOutlined, SwapOutlined, FileTextOutlined, QuestionCircleOutlined, TeamOutlined } from "@ant-design/icons";
+import { DashboardOutlined, BankOutlined, SwapOutlined, FileTextOutlined, ShoppingCartOutlined, ShopOutlined, TeamOutlined } from "@ant-design/icons";
 import "@ant-design/v5-patch-for-react-19";
 import "@refinedev/antd/dist/reset.css";
 import { authProvider, dataProvider, api } from "./api";
-import { Dashboard, Accounts, Transactions, Pending, Reports, Users, Password } from "./pages";
+import { Dashboard, Accounts, Transactions, Banking, Reports, Users, Password } from "./pages";
 import "./style.css";
 
 export default function App() {
@@ -24,8 +24,10 @@ export default function App() {
       resources={[
         { name: "dashboard", list: "/", meta: { label: "Overview", icon: <DashboardOutlined /> } },
         { name: "accounts", list: "/accounts", meta: { label: "Chart of Accounts", icon: <BankOutlined /> } },
-        { name: "transactions", list: "/transactions", meta: { label: "Transactions & Invoices", icon: <SwapOutlined /> } },
-        { name: "pending", list: "/pending", meta: { label: "Unclassified Deposits", icon: <QuestionCircleOutlined /> } },
+        { name: "journal", list: "/journal", meta: { label: "Journal", icon: <SwapOutlined /> } },
+        { name: "sales", list: "/sales", meta: { label: "Sales", icon: <ShopOutlined /> } },
+        { name: "purchases", list: "/purchases", meta: { label: "Purchases", icon: <ShoppingCartOutlined /> } },
+        { name: "banking", list: "/banking", meta: { label: "Banking", icon: <BankOutlined /> } },
         { name: "reports", list: "/reports", meta: { label: "Financial Reports", icon: <FileTextOutlined /> } },
         { name: "admin/users", list: "/users", meta: { label: "Users & Roles", icon: <TeamOutlined /> } },
         { name: "password", list: "/password", meta: { label: "Change Password" } },
@@ -35,7 +37,11 @@ export default function App() {
           <ThemedLayout Title={() => <strong style={{ fontSize: 20, color: "#1e40af" }}>Simple Books</strong>}><Outlet /></ThemedLayout>
         </Authenticated>}>
           <Route index element={<Dashboard />} /><Route path="accounts" element={<Accounts />} />
-          <Route path="transactions" element={<Transactions />} /><Route path="pending" element={<Pending />} />
+          <Route path="journal" element={<Transactions key="journal" section="journal" />} />
+          <Route path="sales" element={<Transactions key="sales" section="sales" />} />
+          <Route path="purchases" element={<Transactions key="purchases" section="purchases" />} />
+          <Route path="banking" element={<Banking />} />
+          <Route path="transactions" element={<Navigate to="/journal" replace />} /><Route path="pending" element={<Navigate to="/banking?tab=pending" replace />} />
           <Route path="reports" element={<Reports />} /><Route path="users" element={<Users />} />
           <Route path="password" element={<Password />} />
         </Route>

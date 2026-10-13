@@ -5,7 +5,7 @@ import dayjs from "dayjs";
 import { api } from "./api";
 
 const money = (v: any) => Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const labels: Record<string, string> = { BANK: "Bank", EQUITY: "Equity", RECEIVABLE: "Receivables", PAYABLE: "Payables", OPERATING_REVENUE: "Operating revenue", OPERATING_EXPENSE: "Operating expenses", NON_CURRENT_ASSET: "Non-current assets", CURRENT_ASSET: "Current assets", CURRENT_LIABILITY: "Current liabilities", NON_CURRENT_LIABILITY: "Non-current liabilities", DIRECT_EXPENSE: "Direct expenses", OVERHEAD_EXPENSE: "Overhead expenses", journal: "Journal entry", suspense: "Unclassified Deposits", reclassification: "Reclassification", invoice: "Customer invoice", bill: "Supplier bill", receipt: "Customer receipt", payment: "Supplier payment" };
+const labels: Record<string, string> = { BANK: "Bank", EQUITY: "Equity", RECEIVABLE: "Receivables", PAYABLE: "Payables", OPERATING_REVENUE: "Operating revenue", OPERATING_EXPENSE: "Operating expenses", NON_CURRENT_ASSET: "Non-current assets", CURRENT_ASSET: "Current assets", CURRENT_LIABILITY: "Current liabilities", NON_CURRENT_LIABILITY: "Non-current liabilities", DIRECT_EXPENSE: "Direct expenses", OVERHEAD_EXPENSE: "Overhead expenses", journal: "Journal entry", reversal: "Reversal", suspense: "Unclassified Deposits", reclassification: "Reclassification", invoice: "Customer invoice", bill: "Supplier bill", receipt: "Customer receipt", payment: "Supplier payment" };
 const resultLabels: Record<string, string> = { GROSS_PROFIT: "Gross profit", TOTAL_REVENUE: "Total revenue", TOTAL_EXPENSES: "Total expenses", NET_PROFIT: "Net profit", DEBIT: "Total debits", CREDIT: "Total credits", NET_ASSETS: "Net assets", TOTAL_ASSETS: "Total assets", TOTAL_LIABILITIES: "Total liabilities", TOTAL_EQUITY: "Total equity", NET_CASH_FLOW: "Net cash flow", BEGIN_CASH_BALANCE: "Beginning cash balance", END_CASH_BALANCE: "Ending cash balance", CASHBOOK_BALANCE: "Cashbook balance" };
 const today = () => dayjs().format("YYYY-MM-DD");
 function useRows(resource: string) {
@@ -49,21 +49,38 @@ export function Accounts() {
   </Page>;
 }
 
-export function Transactions() {
+type TransactionSection = "journal" | "sales" | "purchases" | "banking";
+const sectionConfig = {
+  journal: { title: "Journal", kinds: ["journal", "reversal"], create: ["journal"], payment: "", document: "", add: "New Journal Entry" },
+  sales: { title: "Sales", kinds: ["invoice", "receipt"], create: ["invoice", "receipt"], payment: "receipt", document: "invoice", add: "New Invoice / Receipt" },
+  purchases: { title: "Purchases", kinds: ["bill", "payment"], create: ["bill", "payment"], payment: "payment", document: "bill", add: "New Bill / Payment" },
+  banking: { title: "Banking", kinds: ["journal", "reversal", "receipt", "payment", "suspense", "reclassification"], create: [], payment: "", document: "", add: "" },
+};
+function exportTransactions(rows: any[], section: string) {
+  const fields = ["date", "number", "kind", "description", "account", "amount"];
+  const escape = (v: any) => { let text = String(v ?? ""); if (/^[\s]*[=+@-]/.test(text)) text = "'" + text; return '"' + text.replaceAll('"', '""') + '"'; };
+  const csv = '\ufeff' + [fields, ...rows.map(r => fields.map(f => r[f]))].map(r => r.map(escape).join(",")).join("\r\n");
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a"); link.href = url; link.download = `${section}.csv`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+export function Transactions({ section = "journal" }: { section?: TransactionSection }) {
+  const config = sectionConfig[section];
   const data = useRows("transactions"), accounts = useRows("accounts"), user = useUser();
-  const [open, setOpen] = useState(false), [selected, setSelected] = useState<any>(), [kind, setKind] = useState("journal"), [filter, setFilter] = useState("all");
+  const [open, setOpen] = useState(false), [selected, setSelected] = useState<any>(), [kind, setKind] = useState<string>(config.create[0] || "journal"), [filter, setFilter] = useState("all");
   const [range, setRange] = useState<any>(null); const [form] = Form.useForm();
   const [assignOpen, setAssignOpen] = useState(false), [assignForm] = Form.useForm();
   const send = useSubmit(() => { accounts.refresh(); return data.refresh(); }, () => { setOpen(false); form.resetFields(); });
   const allocate = useSubmit(data.refresh, () => { setAssignOpen(false); assignForm.resetFields(); });
   const writable = user.role !== "Viewer";
-  const rows = data.rows.filter(t => (filter === "all" || t.kind === filter) && (!range || t.date >= range[0].format("YYYY-MM-DD") && t.date <= range[1].format("YYYY-MM-DD")));
-  function create() { form.resetFields(); form.setFieldsValue({ date: today(), kind: "journal", lines: [{ quantity: 1 }] }); setKind("journal"); setOpen(true); }
+  const bankIds = new Set(accounts.rows.filter(a => a.account_type === "BANK").map(a => a.id));
+  const scopedRows = data.rows.filter(t => section === "banking" ? bankIds.has(t.account_id) || t.lines.some((l: any) => bankIds.has(l.account_id)) : (config.kinds as string[]).includes(t.kind));
+  const rows = scopedRows.filter(t => (filter === "all" || t.kind === filter) && (!range || t.date >= range[0].format("YYYY-MM-DD") && t.date <= range[1].format("YYYY-MM-DD")));
+  function create() { form.resetFields(); form.setFieldsValue({ date: today(), kind: config.create[0], lines: [{ quantity: 1 }] }); setKind(config.create[0]); setOpen(true); }
   const docTypes = kind === "invoice" || kind === "receipt" ? ["RECEIVABLE"] : ["PAYABLE"];
   const lineTypes = kind === "receipt" || kind === "payment" ? ["BANK"] : kind === "invoice" ? ["OPERATING_REVENUE"] : undefined;
-  return <Page title="Transactions & Invoices" extra={<Space>{writable && <><Button onClick={() => setAssignOpen(true)}>Allocate Payments</Button><Button type="primary" onClick={create}>Add Transaction</Button></>}</Space>}>
-    <Card><Space wrap style={{ marginBottom: 16 }}><Select value={filter} onChange={setFilter} style={{ width: 160 }} options={[{ value: "all", label: "All transactions" }, ...["journal", "invoice", "bill", "receipt", "payment"].map(value => ({ value, label: labels[value] }))]} />
-      <DatePicker.RangePicker onChange={setRange} /><Button onClick={() => window.open(`/api/export/transactions?start=${range ? range[0].format("YYYY-MM-DD") : dayjs().startOf("year").format("YYYY-MM-DD")}&end=${range ? range[1].format("YYYY-MM-DD") : today()}`)}>Export CSV</Button></Space>
+  return <Page title={config.title} extra={<Space>{writable && <>{config.payment && <Button onClick={() => setAssignOpen(true)}>Allocate Payments</Button>}{config.create.length > 0 && <Button type="primary" onClick={create}>{config.add}</Button>}</>}</Space>}>
+    <Card><Space wrap style={{ marginBottom: 16 }}><Select value={filter} onChange={setFilter} style={{ width: 160 }} options={[{ value: "all", label: "All transactions" }, ...config.kinds.map(value => ({ value, label: labels[value] }))]} />
+      <DatePicker.RangePicker onChange={setRange} /><Button onClick={() => exportTransactions(rows, section)}>Export CSV</Button></Space>
       <Table rowKey="id" loading={data.loading} dataSource={rows} columns={[{ title: "Date", dataIndex: "date" }, { title: "Number", dataIndex: "number" }, { title: "Type", dataIndex: "kind", render: k => labels[k] || k },
         { title: "Description", dataIndex: "description" }, { title: "Amount", dataIndex: "amount", align: "right", render: money },
         { title: "Outstanding", render: (_, t) => ["invoice", "bill"].includes(t.kind) ? money(t.remaining) : "—" },
@@ -74,11 +91,11 @@ export function Transactions() {
         <Table rowKey="account_id" dataSource={selected.lines} pagination={false} columns={[{ title: "Account", dataIndex: "account" }, { title: "Description", dataIndex: "description" }, { title: "Unit price", dataIndex: "amount", render: money }, { title: "Quantity", dataIndex: "quantity" }]} /></>}
     </Drawer>
     <Modal title="Create and Post" open={open} width={800} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={send.busy}>
-      <Form form={form} layout="vertical" initialValues={{ date: today(), kind: "journal", lines: [{ quantity: 1 }] }} onFinish={v => {
+      <Form form={form} layout="vertical" initialValues={{ date: today(), kind: config.create[0], lines: [{ quantity: 1 }] }} onFinish={v => {
         if (kind === "journal") send.submit("journals", { date: v.date, description: v.description, reference: v.reference || "", lines: [{ account_id: v.debit_id, debit: String(v.total) }, { account_id: v.credit_id, credit: String(v.total) }] });
         else send.submit("documents", { ...v, reference: v.reference || "", lines: v.lines.map((l: any) => ({ ...l, amount: String(l.amount), quantity: String(l.quantity || 1) })) });
       }}>
-        <Form.Item name="kind" label="Type"><Select onChange={v => { form.resetFields(); form.setFieldsValue({ kind: v, date: today(), lines: [{ quantity: 1 }] }); setKind(v); }} options={["journal", "invoice", "bill", "receipt", "payment"].map(value => ({ value, label: labels[value] }))} /></Form.Item>
+        <Form.Item name="kind" label="Type"><Select onChange={v => { form.resetFields(); form.setFieldsValue({ kind: v, date: today(), lines: [{ quantity: 1 }] }); setKind(v); }} options={config.create.map(value => ({ value, label: labels[value] }))} /></Form.Item>
         <Row gutter={16}><Col span={12}><DateField /></Col><Col span={12}><Form.Item name="reference" label="Reference"><Input /></Form.Item></Col></Row>
         <Form.Item name="description" label="Description" rules={[{ required: true }]}><Input /></Form.Item>
         {kind === "journal" ? <><Row gutter={16}><Col span={12}><Form.Item name="debit_id" label="Debit account" rules={[{ required: true }]}><AccountsSelect accounts={accounts.rows} /></Form.Item></Col>
@@ -95,11 +112,18 @@ export function Transactions() {
       </Form></Modal>
     <Modal title="Allocate Payments" open={assignOpen} onCancel={() => setAssignOpen(false)} onOk={() => assignForm.submit()} confirmLoading={allocate.busy}>
       <Form form={assignForm} layout="vertical" initialValues={{ date: today() }} onFinish={v => allocate.submit("assignments", { ...v, amount: String(v.amount) })}>
-        <Form.Item name="payment_id" label="Receipt / payment" rules={[{ required: true }]}><Select options={data.rows.filter(t => ["receipt", "payment"].includes(t.kind)).map(t => ({ value: t.id, label: `${t.number} · ${t.account} · ${money(t.amount)}` }))} /></Form.Item>
-        <Form.Item name="document_id" label="Invoice / bill" rules={[{ required: true }]}><Select options={data.rows.filter(t => ["invoice", "bill"].includes(t.kind) && Number(t.remaining) > 0).map(t => ({ value: t.id, label: `${t.number} · ${t.account} · Outstanding ${money(t.remaining)}` }))} /></Form.Item>
+        <Form.Item name="payment_id" label="Receipt / payment" rules={[{ required: true }]}><Select options={data.rows.filter(t => t.kind === config.payment).map(t => ({ value: t.id, label: `${t.number} · ${t.account} · ${money(t.amount)}` }))} /></Form.Item>
+        <Form.Item name="document_id" label="Invoice / bill" rules={[{ required: true }]}><Select options={data.rows.filter(t => t.kind === config.document && Number(t.remaining) > 0).map(t => ({ value: t.id, label: `${t.number} · ${t.account} · Outstanding ${money(t.remaining)}` }))} /></Form.Item>
         <DateField /><Form.Item name="amount" label="Allocation amount" rules={[{ required: true }]}><InputNumber min={0.01} precision={2} /></Form.Item>
       </Form></Modal>
   </Page>;
+}
+
+export function Banking() {
+  return <Tabs defaultActiveKey={new URLSearchParams(window.location.search).get("tab") || "transactions"} items={[
+    { key: "transactions", label: "Bank Transactions", children: <Transactions section="banking" /> },
+    { key: "pending", label: "Unclassified Deposits", children: <Pending /> },
+  ]} />;
 }
 
 export function Pending() {
