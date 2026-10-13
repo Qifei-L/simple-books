@@ -60,6 +60,7 @@ class Assignment(Input):
     document_id: int
     amount: Money
     date: date
+    from_suspense: bool = False
 
 class Suspense(Input):
     bank_id: int
@@ -69,12 +70,19 @@ class Suspense(Input):
     reference: str = Field(default="", max_length=200)
     direction: Literal["in", "out"] = "in"
 
-class Resolve(Input):
+class Classification(Input):
     account_id: int
+    amount: Money
+    document_id: int | None = None
+    clear_amount: Money | None = None
+
+class Resolve(Input):
+    account_id: int | None = None
     date: date
     description: Text
     document_id: int | None = None
     clear_amount: Money | None = None
+    allocations: list[Classification] | None = Field(default=None, min_length=1, max_length=50)
 
 class BankTransaction(Suspense):
     account_id: int | None = None

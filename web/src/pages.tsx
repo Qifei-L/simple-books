@@ -31,7 +31,7 @@ export function Dashboard() {
   return <Page title={company.name || "Overview"} extra={<Tag color="blue">USD · Single company</Tag>}>
     <Row gutter={[16, 16]}><Col xs={24} md={8}><Card><Statistic title="Bank balance" value={rows.filter(a => a.account_type === "BANK").reduce((v, a) => v + Number(a.balance), 0)} precision={2} prefix="$" /></Card></Col>
       <Col xs={24} md={8}><Card><Statistic title="Receivables balance" value={rows.filter(a => a.account_type === "RECEIVABLE").reduce((v, a) => v + Number(a.balance), 0)} precision={2} prefix="$" /></Card></Col>
-      <Col xs={24} md={8}><Card><Statistic title="Unclassified transactions" value={tx.rows.filter(t => t.kind === "suspense" && !t.resolved).length} suffix="transactions" /></Card></Col></Row>
+      <Col xs={24} md={8}><Card><Statistic title="Unclassified transactions" value={tx.rows.filter(t => Number(t.suspense_remaining || 0) !== 0).length} suffix="transactions" /></Card></Col></Row>
     <Card title="Recent Transactions" style={{ marginTop: 24 }}><Table rowKey="id" dataSource={tx.rows.slice(0, 8)} pagination={false} columns={[{ title: "Date", dataIndex: "date" }, { title: "Description", dataIndex: "description" }, { title: "Type", dataIndex: "kind", render: k => labels[k] || k }, { title: "Amount", dataIndex: "amount", align: "right", render: money }]} /></Card>
   </Page>;
 }
@@ -69,7 +69,8 @@ export function Transactions({ section = "journal" }: { section?: TransactionSec
   const [range, setRange] = useState<any>(null); const [form] = Form.useForm();
   const [assignOpen, setAssignOpen] = useState(false), [assignForm] = Form.useForm();
   const clearingId = Form.useWatch("payment_id", assignForm);
-  const clearingSource = data.rows.find(t => t.id === clearingId);
+  const fromSuspense = String(clearingId || "").startsWith("suspense:");
+  const clearingSource = data.rows.find(t => t.id === Number(String(clearingId || "").split(":").pop()));
   const side = section === "sales" ? "ar" : "ap";
   const clearTitle = section === "sales" ? "Clear A/R" : "Clear A/P";
   const send = useSubmit(() => { accounts.refresh(); return data.refresh(); }, () => { setOpen(false); form.resetFields(); });
@@ -115,23 +116,49 @@ export function Transactions({ section = "journal" }: { section?: TransactionSec
         </>}
       </Form></Modal>
     <Modal title={clearTitle} open={assignOpen} onCancel={() => setAssignOpen(false)} onOk={() => assignForm.submit()} confirmLoading={allocate.busy}>
-      <Form name={`${section}-clear`} form={assignForm} layout="vertical" initialValues={{ date: today() }} onFinish={v => allocate.submit("assignments", { ...v, amount: String(v.amount) })}>
-        <Alert type="info" message="Match an existing entry to an invoice or bill. Clearing does not post another accounting entry." style={{ marginBottom: 16 }} />
-        <Form.Item name="payment_id" label="Available clearing entry" rules={[{ required: true }]}><Select onChange={() => assignForm.setFieldsValue({ document_id: undefined, amount: undefined })} options={data.rows.filter(t => t.settlement_side === side && Number(t.available) > 0).map(t => ({ value: t.id, label: `${t.number} · ${t.account} · Available ${money(t.available)}` }))} /></Form.Item>
-        <Form.Item name="document_id" label="Invoice / bill" rules={[{ required: true }]}><Select options={data.rows.filter(t => t.kind === config.document && Number(t.remaining) > 0 && t.account_id === clearingSource?.account_id).map(t => ({ value: t.id, label: `${t.number} · ${t.account} · Outstanding ${money(t.remaining)}` }))} /></Form.Item>
+      <Form name={`${section}-clear`} form={assignForm} layout="vertical" initialValues={{ date: today() }} onFinish={v => allocate.submit("assignments", { ...v, payment_id: clearingSource.id, from_suspense: fromSuspense, amount: String(v.amount) })}>
+        <Alert type="info" message="Match an existing entry or Suspense amount to a document. A Suspense selection is reclassified as part of clearing. Unmatched excess stays in Suspense." style={{ marginBottom: 16 }} />
+        <Form.Item name="payment_id" label="Available entry / Suspense" rules={[{ required: true }]}><Select onChange={() => assignForm.setFieldsValue({ document_id: undefined, amount: undefined })} options={data.rows.flatMap(t => [
+          ...(t.settlement_side === side && Number(t.available) > 0 ? [{ value: `entry:${t.id}`, label: `${t.number} · ${t.account} · Available ${money(t.available)}` }] : []),
+          ...(t.suspense_side === side && Math.abs(Number(t.suspense_remaining)) > 0 ? [{ value: `suspense:${t.id}`, label: `${t.number} · Suspense · Available ${money(Math.abs(Number(t.suspense_remaining)))}` }] : [])
+        ])} /></Form.Item>
+        <Form.Item name="document_id" label="Invoice / bill" rules={[{ required: true }]}><Select onChange={id => { const doc = data.rows.find(t => t.id === id); assignForm.setFieldsValue({ amount: doc ? Math.min(Number(doc.remaining), fromSuspense ? Math.abs(Number(clearingSource?.suspense_remaining)) : Number(clearingSource?.available)) : undefined }); }} options={data.rows.filter(t => t.kind === config.document && Number(t.remaining) > 0 && (fromSuspense || t.account_id === clearingSource?.account_id)).map(t => ({ value: t.id, label: `${t.number} · ${t.account} · Outstanding ${money(t.remaining)}` }))} /></Form.Item>
         <DateField /><Form.Item name="amount" label="Clearing amount" rules={[{ required: true }]}><InputNumber min={0.01} precision={2} /></Form.Item>
       </Form></Modal>
   </Page>;
 }
 
-function OptionalClear({ form, accounts, transactions, direction, amount }: any) {
-  const accountId = Form.useWatch("account_id", form), documentId = Form.useWatch("document_id", form);
+function OptionalClear({ form, accounts, transactions, direction, amount, path = [] }: any) {
+  const setValues = (values: any) => Object.entries(values).forEach(([key, value]) => form.setFieldValue([...path, key], value));
+  const fieldPath = (key: string) => [...(path.length ? path.slice(1) : []), key];
+  const accountId = Form.useWatch([...path, "account_id"], form), documentId = Form.useWatch([...path, "document_id"], form);
   const account = accounts.find((a: any) => a.id === accountId);
   const kind = direction === "in" && account?.account_type === "RECEIVABLE" ? "invoice" : direction === "out" && account?.account_type === "PAYABLE" ? "bill" : null;
+  const documents = transactions.filter((t: any) => t.kind === kind && t.account_id === accountId && Number(t.remaining) > 0);
+  const context = `${accountId}-${kind}-${documents.map((t: any) => `${t.id}:${t.remaining}`).join(",")}`;
+  const autoSelection = useRef({ context: "", attempted: false });
+  useEffect(() => {
+    if (autoSelection.current.context !== context) {
+      autoSelection.current = { context, attempted: false };
+      setValues({ document_id: undefined, clear_amount: undefined });
+    }
+    if (autoSelection.current.attempted || !kind || Number(amount || 0) <= 0) return;
+    autoSelection.current.attempted = true;
+    if (documents.length === 1) setValues({ document_id: documents[0].id, clear_amount: Math.min(Number(amount), Number(documents[0].remaining)) });
+  }, [context, amount, form]);
   if (!kind) return null;
-  return <><Form.Item name="document_id" label="Clear a document now (optional)" preserve={false}>
-    <Select allowClear placeholder="Leave blank to clear later" onChange={id => { const doc = transactions.find((t: any) => t.id === id); form.setFieldsValue({ clear_amount: doc ? Math.min(Number(amount || 0), Number(doc.remaining)) : undefined }); }} options={transactions.filter((t: any) => t.kind === kind && t.account_id === accountId && Number(t.remaining) > 0).map((t: any) => ({ value: t.id, label: `${t.number} · Outstanding ${money(t.remaining)}` }))} />
-  </Form.Item>{documentId && <Form.Item name="clear_amount" label="Clearing amount" preserve={false} rules={[{ required: true }]}><InputNumber min={0.01} max={Number(amount)} precision={2} /></Form.Item>}</>;
+  return <><Form.Item name={fieldPath("document_id")} label="Clear a document now (optional)" preserve={false} extra={documents.length === 1 ? "One open document found and selected automatically. Clear the selection to classify only." : documents.length ? "Select the invoice or bill to clear." : "No open documents for this customer or supplier. You can classify now and clear later."}>
+    <Select allowClear placeholder="Select an invoice / bill, or clear later" onChange={id => { const doc = transactions.find((t: any) => t.id === id); setValues({ clear_amount: doc ? Math.min(Number(amount || 0), Number(doc.remaining)) : undefined }); }} options={documents.map((t: any) => ({ value: t.id, label: `${t.number} · Outstanding ${money(t.remaining)}` }))} />
+  </Form.Item>{documentId && <Form.Item name={fieldPath("clear_amount")} label="Clearing amount" preserve={false} rules={[{ required: true }]}><InputNumber min={0.01} max={Number(amount)} precision={2} /></Form.Item>}</>;
+}
+
+function ClassificationLine({ field, form, accounts, transactions, direction, remove }: any) {
+  const amount = Form.useWatch(["allocations", field.name, "amount"], form);
+  return <Card size="small" style={{ marginBottom: 12 }}><Row gutter={12}>
+    <Col span={14}><Form.Item name={[field.name, "account_id"]} label="Classification account" rules={[{ required: true }]}><AccountsSelect accounts={accounts.filter((a: any) => a.name !== "Suspense" && a.account_type !== "BANK")} onChange={() => { form.setFieldValue(["allocations", field.name, "document_id"], undefined); form.setFieldValue(["allocations", field.name, "clear_amount"], undefined); }} /></Form.Item></Col>
+    <Col span={8}><Form.Item name={[field.name, "amount"]} label="Amount" rules={[{ required: true }]}><InputNumber min={0.01} precision={2} style={{ width: "100%" }} /></Form.Item></Col>
+    <Col span={2}><Button danger type="text" style={{ marginTop: 30 }} onClick={() => remove(field.name)}>×</Button></Col>
+  </Row><OptionalClear form={form} path={["allocations", field.name]} accounts={accounts} transactions={transactions} direction={direction} amount={amount} /></Card>;
 }
 
 export function Banking() {
@@ -139,10 +166,14 @@ export function Banking() {
   const [open, setOpen] = useState(false), [target, setTarget] = useState<any>(), [bankId, setBankId] = useState<number>(), [status, setStatus] = useState("all");
   const [form] = Form.useForm(), [resolveForm] = Form.useForm();
   const direction = Form.useWatch("direction", form) || "in", amount = Form.useWatch("amount", form);
+  const entryDocument = Form.useWatch("document_id", form), allocations = Form.useWatch("allocations", resolveForm) || [];
+  const classifyDocument = allocations.some((line: any) => line?.document_id);
+  const suspenseBudget = Math.abs(Number(target?.suspense_remaining || 0));
+  const classifiedTotal = allocations.reduce((sum: number, line: any) => sum + (line?.document_id ? Math.min(Number(line.amount || 0), Number(line.clear_amount || line.amount || 0), Number(data.rows.find(t => t.id === line.document_id)?.remaining || 0)) : Number(line?.amount || 0)), 0);
   const refresh = () => { accounts.refresh(); return data.refresh(); };
   const create = useSubmit(refresh, () => { setOpen(false); form.resetFields(); }), resolve = useSubmit(refresh, () => { setTarget(undefined); resolveForm.resetFields(); });
   const banks = accounts.rows.filter(a => a.account_type === "BANK");
-  const allRows = data.rows.flatMap(t => (t.bank_entries || []).map((b: any) => ({ ...t, row_id: `${t.id}-${b.account_id}`, bank: b.account, bank_id: b.account_id, income: Number(b.amount) > 0 ? b.amount : "0", withdrawal: Number(b.amount) < 0 ? String(-Number(b.amount)) : "0", pending: t.kind === "suspense" && !t.resolved })));
+  const allRows = data.rows.flatMap(t => (t.bank_entries || []).map((b: any) => ({ ...t, row_id: `${t.id}-${b.account_id}`, bank: b.account, bank_id: b.account_id, income: Number(b.amount) > 0 ? b.amount : "0", withdrawal: Number(b.amount) < 0 ? String(-Number(b.amount)) : "0", pending: Number(t.suspense_remaining || 0) !== 0 })));
   const rows = allRows.filter(t => (!bankId || t.bank_id === bankId) && (status === "all" || t.pending === (status === "pending")));
   const payload = (v: any) => ({ ...v, ...(v.amount !== undefined ? { amount: String(v.amount) } : {}), ...(v.document_id ? { clear_amount: String(v.clear_amount) } : { document_id: null, clear_amount: null }) });
   return <Page title="Banking" extra={user.role !== "Viewer" && <Button type="primary" onClick={() => { form.resetFields(); form.setFieldsValue({ date: today(), direction: "in" }); setOpen(true); }}>New Bank Transaction</Button>}>
@@ -154,10 +185,11 @@ export function Banking() {
     </Space><Table rowKey="row_id" loading={data.loading || accounts.loading} dataSource={rows} columns={[
       { title: "Date", dataIndex: "date" }, { title: "Bank / petty cash", dataIndex: "bank" }, { title: "Number", dataIndex: "number" }, { title: "Description", dataIndex: "description" },
       { title: "Money in", dataIndex: "income", align: "right", render: money }, { title: "Money out", dataIndex: "withdrawal", align: "right", render: money },
-      { title: "Status", render: (_, t) => <Tag color={t.pending ? "orange" : "green"}>{t.pending ? "Unclassified" : "Classified"}</Tag> },
-      { title: "", render: (_, t) => t.pending && user.role !== "Viewer" && <Button onClick={() => { resolveForm.resetFields(); resolveForm.setFieldsValue({ date: today(), description: t.description }); setTarget(t); }}>Classify</Button> }
+      { title: "Suspense remaining", render: (_, t) => money(Math.abs(Number(t.suspense_remaining || 0))) },
+      { title: "Status", render: (_, t) => <Tag color={t.pending ? "orange" : "green"}>{t.pending ? Math.abs(Number(t.suspense_remaining)) < Number(t.amount) ? "Partially Classified" : "Unclassified" : "Classified"}</Tag> },
+      { title: "", render: (_, t) => t.pending && user.role !== "Viewer" && <Button onClick={() => { resolveForm.resetFields(); resolveForm.setFieldsValue({ date: today(), description: t.description, allocations: [{ amount: Math.abs(Number(t.suspense_remaining)) }] }); setTarget(t); }}>Classify</Button> }
     ]} /></Card>
-    <Modal title="New Bank Transaction" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={create.busy}>
+    <Modal title="New Bank Transaction" okText={entryDocument ? "Save & Clear" : "Save"} open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={create.busy}>
       <Form name="bank-entry" form={form} layout="vertical" onFinish={v => create.submit("bank-transactions", { ...payload(v), account_id: v.account_id ?? null })}>
         <Form.Item name="bank_id" label="Bank / petty cash account" rules={[{ required: true }]}><AccountsSelect accounts={banks} /></Form.Item>
         <Form.Item name="direction" label="Direction" rules={[{ required: true }]}><Select onChange={() => form.setFieldsValue({ document_id: undefined, clear_amount: undefined })} options={[{ value: "in", label: "Money in" }, { value: "out", label: "Money out" }]} /></Form.Item>
@@ -167,12 +199,15 @@ export function Banking() {
         <OptionalClear form={form} accounts={accounts.rows} transactions={data.rows} direction={direction} amount={amount} />
       </Form>
     </Modal>
-    <Modal title={`Classify Transaction · ${money(target?.amount)} USD`} open={!!target} onCancel={() => setTarget(undefined)} onOk={() => resolveForm.submit()} confirmLoading={resolve.busy}>
-      <Form name="bank-classify" form={resolveForm} layout="vertical" onFinish={v => resolve.submit(`suspense/${target.id}/resolve`, payload(v))}>
+    <Modal title={`Classify Transaction · ${money(suspenseBudget)} USD`} okText={classifyDocument ? "Classify & Clear" : "Classify"} open={!!target} onCancel={() => setTarget(undefined)} onOk={() => resolveForm.submit()} confirmLoading={resolve.busy}>
+      <Form name="bank-classify" form={resolveForm} layout="vertical" onFinish={v => resolve.submit(`suspense/${target.id}/resolve`, { ...v, allocations: v.allocations.map((line: any) => ({ ...line, amount: String(line.amount), ...(line.document_id ? { clear_amount: String(line.clear_amount || line.amount) } : { document_id: null, clear_amount: null }) })) })}>
         <Alert type="info" message="Reclassify the existing bank entry. You can clear a matching invoice or bill now, or leave it for later. The bank amount is not posted again." style={{ marginBottom: 16 }} />
-        <Form.Item name="account_id" label="Classification account" rules={[{ required: true }]}><AccountsSelect accounts={accounts.rows.filter(a => a.name !== "Suspense" && a.account_type !== "BANK")} onChange={() => resolveForm.setFieldsValue({ document_id: undefined, clear_amount: undefined })} /></Form.Item>
         <DateField /><Form.Item name="description" label="Reason for classification" rules={[{ required: true }]}><Input /></Form.Item>
-        <OptionalClear form={resolveForm} accounts={accounts.rows} transactions={data.rows} direction={target?.direction} amount={target?.amount} />
+        <Form.List name="allocations" rules={[{ validator: async (_, lines) => { if (!lines?.length) throw new Error("Add at least one classification line."); } }]}>{(fields, { add, remove }, { errors }) => <>
+          {fields.map(field => <ClassificationLine key={field.key} field={field} form={resolveForm} accounts={accounts.rows} transactions={data.rows} direction={target?.suspense_side === "ap" ? "out" : "in"} remove={remove} />)}
+          <Button onClick={() => add({ amount: Math.max(0, suspenseBudget - classifiedTotal) })}>Add Classification</Button><Form.ErrorList errors={errors} />
+        </>}</Form.List>
+        <Alert style={{ marginTop: 16 }} type={classifiedTotal > suspenseBudget ? "warning" : "info"} message={`Suspense available ${money(suspenseBudget)} · Allocated ${money(Math.min(classifiedTotal, suspenseBudget))} · Remaining in Suspense ${money(Math.max(0, suspenseBudget - classifiedTotal))}`} />
       </Form>
     </Modal>
   </Page>;
