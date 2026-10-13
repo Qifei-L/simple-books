@@ -6,7 +6,7 @@ import { api } from "./api";
 
 const money = (v: any) => Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const labels: Record<string, string> = { BANK: "Bank", EQUITY: "Equity", RECEIVABLE: "Receivables", PAYABLE: "Payables", OPERATING_REVENUE: "Operating revenue", OPERATING_EXPENSE: "Operating expenses", NON_CURRENT_ASSET: "Non-current assets", CURRENT_ASSET: "Current assets", CURRENT_LIABILITY: "Current liabilities", NON_CURRENT_LIABILITY: "Non-current liabilities", DIRECT_EXPENSE: "Direct expenses", OVERHEAD_EXPENSE: "Overhead expenses", journal: "Journal entry", suspense: "Unclassified Deposits", reclassification: "Reclassification", invoice: "Customer invoice", bill: "Supplier bill", receipt: "Customer receipt", payment: "Supplier payment" };
-const resultLabels: Record<string, string> = { GROSS_PROFIT: "Gross profit", TOTAL_REVENUE: "Revenue subtotal", TOTAL_EXPENSES: "Expense subtotal", NET_PROFIT: "Net profit", DEBIT: "Total debits", CREDIT: "Total credits", NET_ASSETS: "Net assets", TOTAL_ASSETS: "Total assets", TOTAL_LIABILITIES: "Total liabilities", TOTAL_EQUITY: "Total equity", NET_CASH_FLOW: "Net cash flow" };
+const resultLabels: Record<string, string> = { GROSS_PROFIT: "Gross profit", TOTAL_REVENUE: "Total revenue", TOTAL_EXPENSES: "Total expenses", NET_PROFIT: "Net profit", DEBIT: "Total debits", CREDIT: "Total credits", NET_ASSETS: "Net assets", TOTAL_ASSETS: "Total assets", TOTAL_LIABILITIES: "Total liabilities", TOTAL_EQUITY: "Total equity", NET_CASH_FLOW: "Net cash flow", BEGIN_CASH_BALANCE: "Beginning cash balance", END_CASH_BALANCE: "Ending cash balance", CASHBOOK_BALANCE: "Cashbook balance" };
 const today = () => dayjs().format("YYYY-MM-DD");
 function useRows(resource: string) {
   const list = useList<any>({ resource, pagination: { mode: "off" } });
@@ -133,10 +133,16 @@ export function Reports() {
   return <Page title="Financial Reports" extra={<Space><DatePicker.RangePicker allowClear={false} value={range} onChange={v => { if (v) setRange(v); }} /><Button onClick={() => window.open(`/api/export/reports/${name}?${params}`)}>Export CSV</Button><Button onClick={() => window.print()}>Print</Button></Space>}>
     <Tabs activeKey={name} onChange={setName} items={[{ key: "income", label: "Income Statement" }, { key: "balance", label: "Balance Sheet" }, { key: "trial", label: "Trial Balance" }, { key: "cashflow", label: "Cash Flow Statement" }]} />
     <Card loading={loading}>{report && <><div className="report-totals">{Object.entries(report.results).map(([k, v]) => <Statistic key={k} title={resultLabels[k] || k.replaceAll("_", " ")} value={Number(v)} precision={2} />)}</div>
-      <Table<any> className="report-print" rowKey={r => `${r.section}-${r.account_code}`} pagination={false} dataSource={report.rows} locale={{ emptyText: "No activity in the selected period" }} columns={[
-        { title: "Code", dataIndex: "account_code" }, { title: "Account", dataIndex: "account" },
-        { title: "Group", dataIndex: "category" }, { title: "Net debit (USD)", dataIndex: "amount", align: "right", render: money }]} />
-      <Typography.Text type="secondary">Account details show debits as positive and credits as negative. Summary figures follow the report presentation.</Typography.Text>
+      <Typography.Paragraph type="secondary">{report.basis === "as_at" ? `As at ${report.end}. Current year earnings include activity from ${report.start}; the selected start date does not filter closing balances.` : `Activity from ${report.start} to ${report.end}.`}</Typography.Paragraph>
+      {report.reconciliation_difference !== null && <Alert style={{ marginBottom: 16 }} type={Number(report.reconciliation_difference) === 0 ? "success" : "error"} showIcon message={Number(report.reconciliation_difference) === 0 ? "Reconciled · Difference 0.00" : `Reconciliation difference: ${money(report.reconciliation_difference)} USD`} />}
+      <Table<any> className="report-print" rowKey={r => `${r.section}-${r.account_code}-${r.account}`} pagination={false} dataSource={report.rows} locale={{ emptyText: "No activity in the selected period" }} columns={[
+        { title: "Section", dataIndex: "section" }, { title: "Code", dataIndex: "account_code" }, { title: name === "cashflow" ? "Item" : "Account", dataIndex: "account" },
+        { title: "Group", dataIndex: "category" }, ...(name === "trial" ? [
+          { title: "Debit (USD)", dataIndex: "debit", align: "right" as const, render: money },
+          { title: "Credit (USD)", dataIndex: "credit", align: "right" as const, render: money }
+        ] : [{ title: "Amount (USD)", dataIndex: "amount", align: "right" as const, render: money }])]} />
+      {name !== "trial" && <Descriptions style={{ marginTop: 20 }} column={3} items={Object.entries(report.section_totals).map(([key, value]) => ({ key, label: key, children: money(value) }))} />}
+      <Typography.Text type="secondary">{name === "balance" ? "Current year earnings are calculated automatically for this report; no closing journal is required to display them. Credit balances in liabilities and equity are shown as positive." : name === "income" ? "Revenue uses credit-positive amounts; expenses use debit-positive amounts. Net profit equals total revenue minus total expenses." : name === "cashflow" ? "Indirect cash flow: profit plus balance-sheet adjustments. Beginning cash plus net cash flow must equal the cashbook balance." : "Closing balances are shown separately as debits and credits, before year-end closing."}</Typography.Text>
     </>}</Card>
   </Page>;
 }

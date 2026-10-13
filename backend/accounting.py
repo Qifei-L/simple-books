@@ -8,7 +8,7 @@ from sqlalchemy import select, insert, update
 from python_accounting.models import Base, Entity, Currency, Account, LineItem, Transaction, Assignment
 from python_accounting.database.session import get_session, AccountingSession
 from python_accounting.transactions import (JournalEntry, ClientInvoice, SupplierBill, ClientReceipt, SupplierPayment)
-from python_accounting.reports import IncomeStatement, BalanceSheet, TrialBalance, CashflowStatement
+from python_accounting.config import config
 from .db import engine, metadata, operations, audit
 
 class AtomicSession(AccountingSession):
@@ -263,15 +263,85 @@ def report(name, start, end):
         raise HTTPException(422, "Select a date range within one calendar year for this version.")
     with session() as s:
         d0, d1 = datetime.combine(start, time.min), datetime.combine(end, time.max)
-        cls = {"income": IncomeStatement, "balance": BalanceSheet,
-               "trial": TrialBalance, "cashflow": CashflowStatement}[name]
-        r = cls(s, d0, d1) if name in ("income", "cashflow") else cls(s, d1)
+        # Use engine account balances, not report printouts/type-netted totals.
+        # In particular, keep opposite balances in the same account type separate.
+        accounts = s.scalars(select(Account).where(Account.entity_id == s.entity.id)
+                             .order_by(Account.account_code)).all()
+        closing = {a.id: Decimal(a.closing_balance(s, d1)) for a in accounts}
+        movement = {a.id: Decimal(a.balance_movement(s, d0, d1)) for a in accounts}
+        income = config.reports["income_statement"]["sections"]
+        income_types = {t for v in income.values() for t in v["account_types"]}
+        earnings = -sum((closing[a.id] for a in accounts if a.account_type.name in income_types), Decimal(0))
         rows = []
-        for section, kinds in r.accounts.items():
-            for kind, cats in kinds.items():
-                for cat, details in cats.items():
-                    for a in details["accounts"]:
-                        rows.append(dict(section=section, category=cat, account=a.name,
-                            account_code=a.account_code, amount=str(a.closing)))
-        return dict(name=name, start=start, end=end, currency="USD", text=str(r),
-            results={k: str(v) for k, v in r.result_amounts.items()}, rows=rows)
+        results, totals = {}, {}
+
+        def add(section, label, value, code="", category="", debit=None, credit=None):
+            row = dict(section=section, category=category, account=label,
+                       account_code=code, amount=str(value))
+            if debit is not None:
+                row.update(debit=str(debit), credit=str(credit))
+            rows.append(row)
+
+        if name == "cashflow":
+            cf = config.reports["cashflow_statement"]
+            for key, section in cf["sections"].items():
+                if key == "NET_CASH_FLOW":
+                    continue
+                total = Decimal(0)
+                for subkey in section["sub_sections"]:
+                    sub = cf["sub_sections"][subkey]
+                    value = -sum((movement[a.id] for a in accounts
+                                  if a.account_type.name in sub["account_types"]), Decimal(0))
+                    if value:
+                        add(section["label"], sub["label"], value)
+                    total += value
+                totals[section["label"]] = total
+            banks = [a for a in accounts if a.account_type.name == "BANK"]
+            cash = sum((closing[a.id] for a in banks), Decimal(0))
+            cash_movement = sum((movement[a.id] for a in banks), Decimal(0))
+            # Subtract the interval movement so start-day entries are not also
+            # counted in opening cash (the engine's section helper is inclusive).
+            opening = cash - cash_movement
+            net = sum(totals.values(), Decimal(0))
+            results = dict(BEGIN_CASH_BALANCE=opening, NET_CASH_FLOW=net,
+                           END_CASH_BALANCE=opening + net, CASHBOOK_BALANCE=cash)
+            difference = opening + net - cash
+        else:
+            spec = config.reports[{"income": "income_statement", "balance": "balance_sheet",
+                                   "trial": "trial_balance"}[name]]["sections"]
+            for key, section in spec.items():
+                total = Decimal(0)
+                for a in accounts:
+                    if a.account_type.name not in section["account_types"]:
+                        continue
+                    raw = movement[a.id] if name == "income" else closing[a.id]
+                    # Revenue, liabilities and equity have a normal credit balance.
+                    value = -raw if key in ("OPERATING_REVENUES", "NON_OPERATING_REVENUES", "LIABILITIES", "EQUITY") else raw
+                    if raw:
+                        add(section["label"], a.name, value, a.account_code,
+                            a.category.name if a.category else a.account_type.value,
+                            max(raw, Decimal(0)) if name == "trial" else None,
+                            max(-raw, Decimal(0)) if name == "trial" else None)
+                    total += value
+                totals[section["label"]] = total
+            if name == "income":
+                revenue = totals["Operating Revenues"] + totals["Non Operating Revenues"]
+                expenses = totals["Operating Expenses"] + totals["Non Operating Expenses"]
+                results = dict(TOTAL_REVENUE=revenue, TOTAL_EXPENSES=expenses, NET_PROFIT=revenue - expenses)
+                difference = None
+            elif name == "balance":
+                add("Equity", "Current year earnings (unclosed)", earnings, category="Current year earnings")
+                totals["Equity"] += earnings
+                results = dict(TOTAL_ASSETS=totals["Assets"], TOTAL_LIABILITIES=totals["Liabilities"],
+                               NET_ASSETS=totals["Assets"] - totals["Liabilities"], TOTAL_EQUITY=totals["Equity"])
+                difference = results["NET_ASSETS"] - results["TOTAL_EQUITY"]
+            else:
+                results = dict(DEBIT=sum((Decimal(r["debit"]) for r in rows), Decimal(0)),
+                               CREDIT=sum((Decimal(r["credit"]) for r in rows), Decimal(0)))
+                difference = results["DEBIT"] - results["CREDIT"]
+        effective_start = date(end.year, s.entity.year_start, 1) if name in ("balance", "trial") else start
+        return dict(name=name, start=effective_start, end=end, currency="USD",
+            basis="as_at" if name in ("balance", "trial") else "period",
+            results={k: str(v) for k, v in results.items()}, rows=rows,
+            section_totals={k: str(v) for k, v in totals.items()},
+            reconciliation_difference=str(difference) if difference is not None else None)

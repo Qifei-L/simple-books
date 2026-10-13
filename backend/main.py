@@ -264,7 +264,8 @@ def export_transactions(start: date, end: date, user: User = Depends(current_use
 def export_report(name: Literal["income", "balance", "trial", "cashflow"], start: date, end: date,
                   user: User = Depends(current_user)):
     return csv_response(books.report(name, start, end)["rows"],
-                        ["section", "category", "account", "account_code", "amount"], f"{name}.csv")
+                        ["section", "category", "account", "account_code", "amount"] +
+                        (["debit", "credit"] if name == "trial" else []), f"{name}.csv")
 
 @app.get("/api/admin/users")
 def list_users(user: User = Depends(admin)):

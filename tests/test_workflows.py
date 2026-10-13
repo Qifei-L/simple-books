@@ -1,5 +1,6 @@
 import os
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 import uuid
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test-books.db")
@@ -45,6 +46,72 @@ def report(c, name):
     r = c.get(f"/api/reports/{name}", params={"start": START, "end": END})
     assert r.status_code == 200, r.text
     return r.json()
+
+def test_uncollected_invoice_reconciles_all_reports_and_export(client):
+    c, a = client, account_ids(client)
+    r = post(c, "/api/documents", dict(kind="invoice", date=DAY, description="Invoice 150",
+        account_id=a["Demo Customer"], lines=[dict(description="Services", account_id=a["Service Revenue"], amount="150")]))
+    assert r.status_code == 200, r.text
+    income, balance, trial, cash = [report(c, n) for n in ("income", "balance", "trial", "cashflow")]
+    assert Decimal(income["results"]["NET_PROFIT"]) == 150
+    equity = [r for r in balance["rows"] if r["section"] == "Equity"]
+    assert len(equity) == 1 and Decimal(equity[0]["amount"]) == 150
+    assert Decimal(balance["results"]["TOTAL_ASSETS"]) == Decimal(balance["results"]["TOTAL_EQUITY"]) == 150
+    assert Decimal(trial["results"]["DEBIT"]) == Decimal(trial["results"]["CREDIT"]) == 150
+    assert sum(Decimal(r["debit"]) for r in trial["rows"]) == 150
+    adjustments = {r["account"]: Decimal(r["amount"]) for r in cash["rows"]}
+    assert adjustments["Net Profit"] == 150 and adjustments["Receivables"] == -150
+    assert Decimal(cash["results"]["NET_CASH_FLOW"]) == Decimal(cash["results"]["END_CASH_BALANCE"]) == 0
+    for r in (balance, trial, cash):
+        assert Decimal(r["reconciliation_difference"]) == 0
+    for name, label in (("balance", "Current year earnings (unclosed)"), ("cashflow", "Receivables"), ("trial", "debit,credit")):
+        exported = c.get(f"/api/export/reports/{name}", params={"start": START, "end": END})
+        assert exported.status_code == 200 and label in exported.text
+    # A deliberate closing journal moves earnings to capital; the report must
+    # not add the original profit a second time.
+    closed = post(c, "/api/journals", dict(date=DAY, description="Close income",
+        lines=[dict(account_id=a["Service Revenue"], debit="150"),
+               dict(account_id=a["Owner Capital"], credit="150")]))
+    assert closed.status_code == 200, closed.text
+    after = report(c, "balance")
+    assert Decimal(next(r["amount"] for r in after["rows"] if r["account"] == "Current year earnings (unclosed)")) == 0
+    assert Decimal(after["results"]["TOTAL_EQUITY"]) == 150
+    assert Decimal(after["reconciliation_difference"]) == 0
+
+def test_report_normal_signs_same_type_offsets_and_period_boundary(client):
+    c, a = client, account_ids(client)
+    year = date.today().year
+    first, boundary = f"{year}-02-01", f"{year}-03-01"
+    def journal(day, debit, credit, amount):
+        r = post(c, "/api/journals", dict(date=day, description="Report regression",
+            lines=[dict(account_id=debit, debit=amount), dict(account_id=credit, credit=amount)]))
+        assert r.status_code == 200, r.text
+    journal(first, a["Bank"], a["Service Revenue"], "200")
+    journal(boundary, a["Office Expenses"], a["Bank"], "30")
+    journal(boundary, a["Bank"], a["Owner Capital"], "100")
+    r = post(c, "/api/accounts", dict(name="Overdraft", account_type="BANK"))
+    assert r.status_code == 200, r.text
+    journal(boundary, a["Bank"], r.json()["id"], "270")
+    trial = report(c, "trial")
+    # Bank +540 and Overdraft -270 must not be netted into one type balance.
+    assert Decimal(trial["results"]["DEBIT"]) == Decimal(trial["results"]["CREDIT"]) == 570
+    full_income = report(c, "income")
+    assert Decimal(full_income["results"]["TOTAL_REVENUE"]) == 200
+    assert Decimal(full_income["results"]["TOTAL_EXPENSES"]) == 30
+    def period(name):
+        r = c.get(f"/api/reports/{name}", params={"start": boundary, "end": boundary})
+        assert r.status_code == 200, r.text
+        return r.json()
+    assert Decimal(period("income")["results"]["NET_PROFIT"]) == -30
+    balance = period("balance")
+    assert Decimal(next(r["amount"] for r in balance["rows"] if r["account"] == "Current year earnings (unclosed)")) == 170
+    assert Decimal(balance["results"]["TOTAL_EQUITY"]) == 270
+    cash = period("cashflow")
+    assert Decimal(cash["results"]["BEGIN_CASH_BALANCE"]) == 200
+    assert Decimal(cash["results"]["NET_CASH_FLOW"]) == 70
+    assert Decimal(cash["results"]["END_CASH_BALANCE"]) == Decimal(cash["results"]["CASHBOOK_BALANCE"]) == 270
+    for r in (balance, trial, cash):
+        assert Decimal(r["reconciliation_difference"]) == 0
 
 def test_suspense_idempotency_and_reclassification(client):
     c = client
