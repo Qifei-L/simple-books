@@ -1,0 +1,14 @@
+{
+  "name": "simple-books-web", "version": "0.1.0", "private": true, "type": "module",
+  "scripts": {"dev": "vite --host 127.0.0.1", "build": "tsc && vite build"},
+  "dependencies": {
+    "@refinedev/core": "5.0.12", "@refinedev/antd": "6.0.3",
+    "@refinedev/react-router": "2.0.4", "@ant-design/icons": "^5.6.1",
+    "@ant-design/v5-patch-for-react-19": "^1.0.3",
+    "antd": "^5.29.0", "react": "^19.1.0", "react-dom": "^19.1.0",
+    "react-router": "^7.9.0", "dayjs": "^1.11.13"
+  },
+  "overrides": { "path-to-regexp": "^8.4.0" },
+  "devDependencies": {"@types/node": "^22", "@types/react": "^19.1.0", "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.7.0", "typescript": "^5.9.2", "vite": "^6.4.0"}
+}
