@@ -6,6 +6,7 @@ import { api } from "./api";
 
 const money = (v: any) => Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const labels: Record<string, string> = { BANK: "银行", EQUITY: "权益", RECEIVABLE: "应收", PAYABLE: "应付", OPERATING_REVENUE: "营业收入", OPERATING_EXPENSE: "营业费用", NON_CURRENT_ASSET: "非流动资产", CURRENT_ASSET: "流动资产", CURRENT_LIABILITY: "流动负债", NON_CURRENT_LIABILITY: "非流动负债", DIRECT_EXPENSE: "直接费用", OVERHEAD_EXPENSE: "管理费用", journal: "日记账", suspense: "未知入账", reclassification: "重新分类", invoice: "客户发票", bill: "供应商账单", receipt: "客户收款", payment: "供应商付款" };
+const resultLabels: Record<string, string> = { GROSS_PROFIT: "毛利润", TOTAL_REVENUE: "收入小计", TOTAL_EXPENSES: "费用小计", NET_PROFIT: "净利润", DEBIT: "借方合计", CREDIT: "贷方合计", NET_ASSETS: "净资产", TOTAL_ASSETS: "资产合计", TOTAL_LIABILITIES: "负债合计", TOTAL_EQUITY: "权益合计", NET_CASH_FLOW: "现金流净额" };
 const today = () => dayjs().format("YYYY-MM-DD");
 function useRows(resource: string) {
   const list = useList<any>({ resource, pagination: { mode: "off" } });
@@ -131,8 +132,12 @@ export function Reports() {
   useEffect(() => { let active = true; setLoading(true); api(`reports/${name}?${params}`).then(r => { if (active) setReport(r); }).catch(e => { if (active) { setReport(undefined); message.error(e.message); } }).finally(() => { if (active) setLoading(false); }); return () => { active = false; }; }, [name, params]);
   return <Page title="财务报表" extra={<Space><DatePicker.RangePicker allowClear={false} value={range} onChange={v => { if (v) setRange(v); }} /><Button onClick={() => window.open(`/api/export/reports/${name}?${params}`)}>导出 CSV</Button><Button onClick={() => window.print()}>打印</Button></Space>}>
     <Tabs activeKey={name} onChange={setName} items={[{ key: "income", label: "利润表" }, { key: "balance", label: "资产负债表" }, { key: "trial", label: "试算平衡表" }, { key: "cashflow", label: "现金流量表" }]} />
-    <Card loading={loading}>{report && <><div className="report-totals">{Object.entries(report.results).map(([k, v]) => <Statistic key={k} title={k.replaceAll("_", " ")} value={Number(v)} precision={2} />)}</div>
-      <pre className="report-print">{report.text}</pre></>}</Card>
+    <Card loading={loading}>{report && <><div className="report-totals">{Object.entries(report.results).map(([k, v]) => <Statistic key={k} title={resultLabels[k] || k.replaceAll("_", " ")} value={Number(v)} precision={2} />)}</div>
+      <Table<any> className="report-print" rowKey={r => `${r.section}-${r.account_code}`} pagination={false} dataSource={report.rows} locale={{ emptyText: "所选日期内没有发生额" }} columns={[
+        { title: "编号", dataIndex: "account_code" }, { title: "科目", dataIndex: "account" },
+        { title: "分组", dataIndex: "category" }, { title: "借方净额（USD）", dataIndex: "amount", align: "right", render: money }]} />
+      <Typography.Text type="secondary">科目明细以借方为正、贷方为负；上方汇总按报表口径显示。</Typography.Text>
+    </>}</Card>
   </Page>;
 }
 

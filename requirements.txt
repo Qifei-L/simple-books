@@ -1,6 +1,7 @@
 fastapi==0.143.0
 fastapi-users==15.0.5
 python-accounting==1.0.1
+SQLAlchemy==2.0.54
 psycopg[binary]==3.3.6
 uvicorn==0.54.0
 pytest==9.1.1

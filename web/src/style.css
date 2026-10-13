@@ -2,5 +2,5 @@ body { background: #f5f7fb; color: #182230; }
 .page-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
 .page-title h3 { margin: 0; }
 .report-totals { display: flex; flex-wrap: wrap; gap: 32px; margin-bottom: 24px; }
-.report-print { white-space: pre; overflow: auto; font-size: 14px; line-height: 1.65; background: #fff; padding: 16px; }
+.report-print { overflow: auto; background: #fff; margin-bottom: 16px; }
 @media print { .ant-layout-sider, .ant-layout-header, .page-title button, .ant-tabs-nav { display: none !important; } .ant-layout-content { margin: 0 !important; padding: 0 !important; } .ant-card { border: 0; } }
