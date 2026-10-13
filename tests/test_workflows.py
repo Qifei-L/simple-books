@@ -176,3 +176,21 @@ def test_concurrent_duplicate_posts_postgres(client):
     assert all(r.status_code == 200 for r in results), [r.text for r in results]
     assert len({r.json()["id"] for r in results}) == 1
     assert len(client.get("/api/transactions").json()) == 1
+
+def test_failure_after_ledger_post_rolls_back_everything(client, monkeypatch):
+    from backend import accounting
+    from sqlalchemy import select, func
+    from backend.db import operations, audit
+    from python_accounting.models import Ledger
+    c = client
+    a = account_ids(c)
+    def fail(*args):
+        raise RuntimeError("Injected failure after library ledger posting")
+    monkeypatch.setattr(accounting, "finish", fail)
+    r = post(c, "/api/suspense", dict(bank_id=a["Bank"], amount="1000", date=DAY, description="Atomic test"))
+    assert r.status_code == 500
+    assert c.get("/api/transactions").json() == []
+    with engine.connect() as conn:
+        assert conn.execute(select(func.count()).select_from(operations)).scalar() == 0
+        assert conn.execute(select(func.count()).select_from(audit)).scalar() == 0
+        assert conn.execute(select(func.count()).select_from(Ledger.__table__)).scalar() == 0

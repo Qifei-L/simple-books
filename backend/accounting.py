@@ -6,10 +6,18 @@ from contextlib import contextmanager
 from fastapi import HTTPException
 from sqlalchemy import select, insert, update
 from python_accounting.models import Base, Entity, Currency, Account, LineItem, Transaction, Assignment
-from python_accounting.database.session import get_session
+from python_accounting.database.session import get_session, AccountingSession
 from python_accounting.transactions import (JournalEntry, ClientInvoice, SupplierBill, ClientReceipt, SupplierPayment)
 from python_accounting.reports import IncomeStatement, BalanceSheet, TrialBalance, CashflowStatement
 from .db import engine, metadata, operations, audit
+
+class AtomicSession(AccountingSession):
+    """Defer library-internal commits to the API unit-of-work boundary."""
+    def commit(self):
+        if self.info.get("atomic"):
+            self.flush()
+        else:
+            super().commit()
 
 def initialize(company="Demo Company"):
     Base.metadata.create_all(engine)
@@ -38,7 +46,7 @@ def initialize(company="Demo Company"):
 
 @contextmanager
 def session(write=False):
-    with get_session(engine) as s:
+    with AtomicSession(bind=engine, info={"include_deleted": False, "ignore_isolation": False, "atomic": write}) as s:
         q = select(Entity).order_by(Entity.id)
         if write:
             # Serializes writes and serial-number/idempotency checks across workers.
@@ -50,6 +58,7 @@ def session(write=False):
         try:
             yield s
             if write:
+                s.info["atomic"] = False
                 s.commit()
         except Exception:
             s.rollback()

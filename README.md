@@ -89,7 +89,7 @@ Dockerfile 接受 Railway 的 PORT；健康检查 /health。不默认部署或�
 
 认证使用可撤销数据库会话，无需向网页暴露 API 密钥。跨站请求防护使用 Strict SameSite Cookie 和写入请求校验头；应用不开放跨域 CORS。角色调整会撤销被修改用户所有会话。
 
-FastAPI Users 的用户/令牌适配器使用 SQLAlchemy Core，避免 Python Accounting 全局 ORM Session 事件影响认证表。账务在独立 AccountingSession 中执行，但共用一个 PostgreSQL 数据库。
+FastAPI Users 的用户/令牌适配器使用 SQLAlchemy Core，避免 Python Accounting 全局 ORM Session 事件影响认证表。账务在独立 AccountingSession 中执行，但共用一个 PostgreSQL 数据库。AtomicSession 将库内部的 commit 延迟为 flush，直到完整 API 操作成功才统一提交，避免分录已入账而审计/重复提交状态未保存。
 
 ## 验证
 
