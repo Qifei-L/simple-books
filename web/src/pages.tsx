@@ -146,6 +146,13 @@ function OptionalClear({ form, accounts, transactions, direction, amount, path =
     autoSelection.current.attempted = true;
     if (documents.length === 1) setValues({ document_id: documents[0].id, clear_amount: Math.min(Number(amount), Number(documents[0].remaining)) });
   }, [context, amount, form]);
+  useEffect(() => {
+    const doc = documents.find((t: any) => t.id === documentId);
+    if (!doc || Number(amount || 0) <= 0) return;
+    const maximum = Math.min(Number(amount), Number(doc.remaining));
+    const current = form.getFieldValue([...path, "clear_amount"]);
+    if (current === undefined || Number(current) > maximum) setValues({ clear_amount: maximum });
+  }, [documentId, amount, context, form]);
   if (!kind) return null;
   return <><Form.Item name={fieldPath("document_id")} label="Clear a document now (optional)" preserve={false} extra={documents.length === 1 ? "One open document found and selected automatically. Clear the selection to classify only." : documents.length ? "Select the invoice or bill to clear." : "No open documents for this customer or supplier. You can classify now and clear later."}>
     <Select allowClear placeholder="Select an invoice / bill, or clear later" onChange={id => { const doc = transactions.find((t: any) => t.id === id); setValues({ clear_amount: doc ? Math.min(Number(amount || 0), Number(doc.remaining)) : undefined }); }} options={documents.map((t: any) => ({ value: t.id, label: `${t.number} · Outstanding ${money(t.remaining)}` }))} />
