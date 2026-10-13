@@ -113,6 +113,90 @@ def test_report_normal_signs_same_type_offsets_and_period_boundary(client):
     for r in (balance, trial, cash):
         assert Decimal(r["reconciliation_difference"]) == 0
 
+@pytest.mark.parametrize("kind,direction,customer,counterpart,side", [
+    ("invoice", "in", "Demo Customer", "Service Revenue", "ar"),
+    ("bill", "out", "Demo Supplier", "Office Expenses", "ap"),
+])
+def test_classify_and_clear_atomic_then_clear_remainder(client, kind, direction, customer, counterpart, side):
+    c, a = client, account_ids(client)
+    doc = post(c, "/api/documents", dict(kind=kind, date=DAY, description="Document",
+        account_id=a[customer], lines=[dict(description="Line", account_id=a[counterpart], amount="150")])).json()
+    pending = post(c, "/api/bank-transactions", dict(bank_id=a["Bank"], direction=direction,
+        date=DAY, description="Unknown", amount="150")).json()
+    assert len(pending["bank_entries"]) == 1
+    bank_before = next(x["balance"] for x in c.get("/api/accounts").json() if x["name"] == "Bank")
+    key = str(uuid.uuid4())
+    payload = dict(account_id=a[customer], date=DAY, description="Identified", document_id=doc["id"], clear_amount="100")
+    r = post(c, f'/api/suspense/{pending["id"]}/resolve', payload, key)
+    assert r.status_code == 200, r.text
+    credit = r.json()
+    assert credit["settlement_side"] == side and Decimal(credit["available"]) == 50
+    assert credit["bank_entries"] == []
+    assert post(c, f'/api/suspense/{pending["id"]}/resolve', payload, key).json()["id"] == credit["id"]
+    rows = c.get("/api/transactions").json()
+    assert len(rows) == 3 and Decimal(next(t["remaining"] for t in rows if t["id"] == doc["id"])) == 50
+    balances = {x["name"]: Decimal(x["balance"]) for x in c.get("/api/accounts").json()}
+    assert balances["Bank"] == Decimal(bank_before) and balances["Suspense"] == 0 and balances[customer] == 0
+    over = post(c, "/api/assignments", dict(payment_id=credit["id"], document_id=doc["id"], amount="51", date=DAY))
+    assert over.status_code == 422
+    cleared = post(c, "/api/assignments", dict(payment_id=credit["id"], document_id=doc["id"], amount="50", date=DAY))
+    assert cleared.status_code == 200, cleared.text
+    after = c.get("/api/transactions").json()
+    assert len(after) == 3 and Decimal(next(t["remaining"] for t in after if t["id"] == doc["id"])) == 0
+    assert {x["name"]: Decimal(x["balance"]) for x in c.get("/api/accounts").json()} == balances
+    assert Decimal(report(c, "cashflow")["reconciliation_difference"]) == 0
+
+def test_failed_inline_clear_rolls_back_classification_and_bank_post(client):
+    c, a = client, account_ids(client)
+    def invoice(account):
+        r = post(c, "/api/documents", dict(kind="invoice", date=DAY, description="Invoice", account_id=account,
+            lines=[dict(description="Service", account_id=a["Service Revenue"], amount="150")]))
+        assert r.status_code == 200, r.text
+        return r.json()["id"]
+    doc = invoice(a["Demo Customer"])
+    other = post(c, "/api/accounts", dict(name="Other customer", account_type="RECEIVABLE")).json()["id"]
+    wrong = invoice(other)
+    pending = post(c, "/api/bank-transactions", dict(bank_id=a["Bank"], direction="in", date=DAY, description="Unknown", amount="150")).json()
+    before = c.get("/api/accounts").json()
+    for document_id, amount in ((wrong, "150"), (doc, "151")):
+        r = post(c, f'/api/suspense/{pending["id"]}/resolve', dict(account_id=a["Demo Customer"], date=DAY,
+            description="Wrong match", document_id=document_id, clear_amount=amount))
+        assert r.status_code == 422, r.text
+        assert c.get("/api/accounts").json() == before
+        rows = c.get("/api/transactions").json()
+        assert len(rows) == 3 and not next(t["resolved"] for t in rows if t["id"] == pending["id"])
+    direct = dict(bank_id=a["Bank"], account_id=a["Demo Customer"], direction="in", date=DAY, description="Known receipt",
+        amount="150", document_id=wrong, clear_amount="150")
+    assert post(c, "/api/bank-transactions", direct).status_code == 422
+    assert c.get("/api/accounts").json() == before
+    direct["document_id"] = doc
+    key = str(uuid.uuid4())
+    r = post(c, "/api/bank-transactions", direct, key)
+    assert r.status_code == 200, r.text
+    assert post(c, "/api/bank-transactions", direct, key).json()["id"] == r.json()["id"]
+    assert Decimal(r.json()["available"]) == 0
+    assert len(c.get("/api/transactions").json()) == 4
+
+@pytest.mark.parametrize("kind,customer,counterpart,side", [
+    ("invoice", "Demo Customer", "Service Revenue", "ar"),
+    ("bill", "Demo Supplier", "Office Expenses", "ap"),
+])
+def test_noncash_journal_clearing_is_link_only_and_cannot_reverse(client, kind, customer, counterpart, side):
+    c, a = client, account_ids(client)
+    doc = post(c, "/api/documents", dict(kind=kind, date=DAY, description="Document", account_id=a[customer],
+        lines=[dict(description="Line", account_id=a[counterpart], amount="150")])).json()
+    lines = [dict(account_id=a["Office Expenses"], debit="150"), dict(account_id=a[customer], credit="150")] if side == "ar" else [dict(account_id=a[customer], debit="150"), dict(account_id=a["Service Revenue"], credit="150")]
+    source = post(c, "/api/journals", dict(date=DAY, description="Noncash settlement", lines=lines))
+    assert source.status_code == 200, source.text
+    source = source.json()
+    assert source["settlement_side"] == side and source["bank_entries"] == []
+    before = c.get("/api/accounts").json()
+    r = post(c, "/api/assignments", dict(payment_id=source["id"], document_id=doc["id"], amount="150", date=DAY))
+    assert r.status_code == 200, r.text
+    assert c.get("/api/accounts").json() == before and len(c.get("/api/transactions").json()) == 2
+    assert Decimal(next(t["remaining"] for t in c.get("/api/transactions").json() if t["id"] == doc["id"])) == 0
+    assert post(c, f'/api/journals/{source["id"]}/reverse', dict(date=DAY, description="Blocked reversal")).status_code == 409
+
 def test_suspense_idempotency_and_reclassification(client):
     c = client
     a = account_ids(c)

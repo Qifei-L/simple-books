@@ -67,11 +67,19 @@ class Suspense(Input):
     date: date
     description: Text
     reference: str = Field(default="", max_length=200)
+    direction: Literal["in", "out"] = "in"
 
 class Resolve(Input):
     account_id: int
     date: date
     description: Text
+    document_id: int | None = None
+    clear_amount: Money | None = None
+
+class BankTransaction(Suspense):
+    account_id: int | None = None
+    document_id: int | None = None
+    clear_amount: Money | None = None
 
 class Reversal(Input):
     date: date
@@ -235,6 +243,10 @@ def assign(data: Assignment, key: Key, user: User = Depends(writer)):
 @app.post("/api/suspense")
 def suspense(data: Suspense, key: Key, user: User = Depends(writer)):
     return books.suspense(data.model_dump(), key, user.id)
+
+@app.post("/api/bank-transactions")
+def bank_transaction(data: BankTransaction, key: Key, user: User = Depends(writer)):
+    return books.bank_transaction(data.model_dump(), key, user.id)
 
 @app.post("/api/suspense/{id}/resolve")
 def resolve(id: int, data: Resolve, key: Key, user: User = Depends(writer)):

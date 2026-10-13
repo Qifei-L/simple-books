@@ -5,7 +5,7 @@ import json
 from contextlib import contextmanager
 from fastapi import HTTPException
 from sqlalchemy import select, insert, update
-from python_accounting.models import Base, Entity, Currency, Account, LineItem, Transaction, Assignment
+from python_accounting.models import Base, Entity, Currency, Account, LineItem, Transaction, Assignment, Ledger
 from python_accounting.database.session import get_session, AccountingSession
 from python_accounting.transactions import (JournalEntry, ClientInvoice, SupplierBill, ClientReceipt, SupplierPayment)
 from python_accounting.config import config
@@ -83,6 +83,13 @@ def transaction_json(s, t):
     op = s.connection().execute(select(operations).where(operations.c.transaction_id == t.id)).mappings().first()
     reversal = s.connection().execute(select(operations.c.id).where(
         operations.c.related_id == t.id, operations.c.kind == "reversal")).first()
+    side = settlement_side(t) if not reversal and (not op or op["kind"] != "reversal") else None
+    bank_entries = {}
+    for entry in s.scalars(select(Ledger).where(Ledger.transaction_id == t.id)).all():
+        account = s.get(Account, entry.post_account_id)
+        if account.account_type.name == "BANK":
+            bank_entries.setdefault(account.id, dict(account_id=account.id, account=account.name, amount=Decimal(0)))
+            bank_entries[account.id]["amount"] += entry.amount * (1 if entry.entry_type.name == "DEBIT" else -1)
     return dict(id=t.id, number=t.transaction_no, date=t.transaction_date.date().isoformat(),
         description=t.narration, reference=t.reference, kind=op["kind"] if op else t.transaction_type.name,
         amount=str(t.amount), account_id=t.account_id, account=t.account.name,
@@ -90,6 +97,9 @@ def transaction_json(s, t):
         remaining=str(t.amount - t.cleared(s)) if hasattr(t, "cleared") else None,
         due_date=op["due_date"] if op else None, resolved=op["resolved"] if op else False,
         reversed=bool(reversal),
+        settlement_side=side, available=str(t.balance(s)) if side else None,
+        bank_entries=[{**v, "amount": str(v["amount"])} for v in bank_entries.values() if v["amount"]],
+        direction="out" if t.credited else "in",
         lines=[dict(account_id=l.account_id, account=l.account.name, description=l.narration,
             amount=str(l.amount), quantity=str(l.quantity), credited=l.credited) for l in t.line_items])
 
@@ -111,11 +121,15 @@ def finish(s, op, t, user_id):
     return transaction_json(s, t)
 
 def post_journal(s, data):
-    entries = data["lines"]
+    entries = list(data["lines"])
     if sum(Decimal(str(x["debit"])) for x in entries) != sum(Decimal(str(x["credit"])) for x in entries):
         raise HTTPException(422, "Total debits and credits must be equal.")
     if len({x["account_id"] for x in entries}) != len(entries):
         raise HTTPException(422, "Each account may appear only once. Combine its amounts first.")
+    # A simple A/R or A/P journal can settle a document without cash.
+    counterparties = [x for x in entries if get_account(s, x["account_id"]).account_type.name in ("RECEIVABLE", "PAYABLE")]
+    if len(entries) == 2 and len(counterparties) == 1:
+        entries.sort(key=lambda x: x is not counterparties[0])
     main = entries[0]
     for x in entries:
         get_account(s, x["account_id"])
@@ -123,7 +137,7 @@ def post_journal(s, data):
             raise HTTPException(422, "Enter either a debit or a credit amount on each line.")
     t = JournalEntry(narration=data["description"], reference=data["reference"],
         transaction_date=datetime.combine(data["date"], time(12)), account_id=main["account_id"],
-        credited=Decimal(str(main["credit"])) > 0, compound=True,
+        credited=Decimal(str(main["credit"])) > 0, compound=len(entries) != 2,
         main_account_amount=Decimal(str(main["credit"])) or Decimal(str(main["debit"])),
         entity_id=s.entity.id)
     s.add(t)
@@ -137,6 +151,9 @@ def post_journal(s, data):
         t.line_items.add(l)
     t.post(s)
     s.flush()
+    # Ledger posting inserts rows directly; refresh the previously empty ORM
+    # relationship before assigning this entry in the same atomic transaction.
+    s.expire(t, ["ledgers"])
     return t
 
 def create_journal(data, key, user_id):
@@ -186,6 +203,8 @@ def reverse_journal(id, data, key, user_id):
             operations.c.related_id == id, operations.c.kind == "reversal", operations.c.id != op["id"])).first():
             raise HTTPException(409, "This journal entry has already been reversed.")
         original = s.get(Transaction, id)
+        if s.scalars(select(Assignment).where((Assignment.transaction_id == id) | (Assignment.assigned_id == id))).first():
+            raise HTTPException(409, "This journal has clearing links. It cannot be reversed while those links exist.")
         if data["date"] < original.transaction_date.date():
             raise HTTPException(422, "The reversal date cannot precede the original transaction.")
         lines = [dict(account_id=original.account_id,
@@ -198,24 +217,42 @@ def reverse_journal(id, data, key, user_id):
                                  reference=f"REVERSE-{id}", lines=lines))
         return finish(s, op, t, user_id)
 
+def settlement_side(t):
+    if t.compound or t.transaction_type not in Assignment.assignables:
+        return None
+    if t.account.account_type.name == "RECEIVABLE" and t.credited:
+        return "ar"
+    if t.account.account_type.name == "PAYABLE" and not t.credited:
+        return "ap"
+    return None
+
+def link_document(s, source, document_id, amount, day):
+    doc = s.get(Transaction, document_id)
+    if not doc or doc.entity_id != s.entity.id or source.entity_id != s.entity.id:
+        raise HTTPException(404, "Document not found.")
+    expected = {"ar": "CLIENT_INVOICE", "ap": "SUPPLIER_BILL"}.get(settlement_side(source))
+    reversed_source = s.connection().execute(select(operations.c.id).where(
+        operations.c.related_id == source.id, operations.c.kind == "reversal")).first()
+    source_op = s.connection().execute(select(operations.c.kind).where(operations.c.transaction_id == source.id)).scalar()
+    if source_op == "reversal" or reversed_source or not expected or doc.transaction_type.name != expected:
+        raise HTTPException(422, "Select an eligible A/R credit or A/P debit and its invoice or bill.")
+    if source.account_id != doc.account_id:
+        raise HTTPException(422, "The clearing entry and document must belong to the same customer or supplier.")
+    if day < max(source.transaction_date.date(), doc.transaction_date.date()):
+        raise HTTPException(422, "The clearing date cannot precede either entry.")
+    a = Assignment(assignment_date=datetime.combine(day, time(18)), transaction_id=source.id,
+        assigned_id=doc.id, assigned_type=doc.__class__.__name__, amount=amount, entity_id=s.entity.id)
+    s.add(a)
+    s.flush()
+
 def assign(data, key, user_id):
     with session(write=True) as s:
         op, existing = reserve(s, key, data, "assignment", user_id)
         if not existing:
             payment = s.get(Transaction, data["payment_id"])
-            doc = s.get(Transaction, data["document_id"])
-            if not payment or not doc:
+            if not payment:
                 raise HTTPException(404, "Document not found.")
-            if (payment.transaction_type.name, doc.transaction_type.name) not in (
-                    ("CLIENT_RECEIPT", "CLIENT_INVOICE"), ("SUPPLIER_PAYMENT", "SUPPLIER_BILL")):
-                raise HTTPException(422, "Allocate customer receipts to invoices or supplier payments to bills.")
-            if data["date"] < max(payment.transaction_date.date(), doc.transaction_date.date()):
-                raise HTTPException(422, "The allocation date cannot precede either document.")
-            a = Assignment(assignment_date=datetime.combine(data["date"], time(18)),
-                transaction_id=payment.id, assigned_id=doc.id, assigned_type=doc.__class__.__name__,
-                amount=data["amount"], entity_id=s.entity.id)
-            s.add(a)
-            s.flush()
+            link_document(s, payment, data["document_id"], data["amount"], data["date"])
             audit_event(s.connection(), user_id, "assign", data)
         return {"id": op["id"], "success": True}
 
@@ -228,9 +265,33 @@ def suspense(data, key, user_id):
         if bank.account_type.name != "BANK":
             raise HTTPException(422, "Select a bank account.")
         pending = s.scalars(select(Account).where(Account.name == "Suspense")).first()
+        outgoing = data.get("direction", "in") == "out"
         t = post_journal(s, dict(date=data["date"], description=data["description"], reference=data["reference"],
-            lines=[dict(account_id=bank.id, debit=data["amount"], credit=0),
-                   dict(account_id=pending.id, debit=0, credit=data["amount"])]))
+            lines=[dict(account_id=bank.id, debit=0 if outgoing else data["amount"], credit=data["amount"] if outgoing else 0),
+                   dict(account_id=pending.id, debit=data["amount"] if outgoing else 0, credit=0 if outgoing else data["amount"])]))
+        return finish(s, op, t, user_id)
+
+def bank_transaction(data, key, user_id):
+    if data["account_id"] is None:
+        if data["document_id"] is not None or data["clear_amount"] is not None:
+            raise HTTPException(422, "Classify the entry to a customer or supplier before clearing a document.")
+        return suspense({k: v for k, v in data.items() if k not in ("account_id", "document_id", "clear_amount")}, key, user_id)
+    with session(write=True) as s:
+        op, existing = reserve(s, key, data, "bank", user_id)
+        if existing:
+            return transaction_json(s, s.get(Transaction, op["transaction_id"]))
+        bank, target = get_account(s, data["bank_id"]), get_account(s, data["account_id"])
+        if bank.account_type.name != "BANK" or target.id == bank.id or target.name == "Suspense":
+            raise HTTPException(422, "Select a bank or petty cash account and a different classification account. Leave classification blank for unknown entries.")
+        if (data["document_id"] is None) != (data["clear_amount"] is None):
+            raise HTTPException(422, "Select a document and a clearing amount together, or leave both blank.")
+        outgoing = data["direction"] == "out"
+        t = post_journal(s, dict(date=data["date"], description=data["description"], reference=data["reference"],
+            lines=[dict(account_id=bank.id, debit=0 if outgoing else data["amount"], credit=data["amount"] if outgoing else 0),
+                   dict(account_id=target.id, debit=data["amount"] if outgoing else 0, credit=0 if outgoing else data["amount"])]))
+        if data["document_id"] is not None:
+            link_document(s, t, data["document_id"], data["clear_amount"], data["date"])
+            audit_event(s.connection(), user_id, "assign", dict(payment_id=t.id, document_id=data["document_id"], amount=str(data["clear_amount"])))
         return finish(s, op, t, user_id)
 
 def resolve_suspense(id, data, key, user_id):
@@ -247,14 +308,20 @@ def resolve_suspense(id, data, key, user_id):
             raise HTTPException(409, "This deposit has already been classified.")
         t0 = s.get(Transaction, id)
         target = get_account(s, data["account_id"])
-        pending_id = next(l.account_id for l in t0.line_items if l.credited)
+        pending_id = next(iter(t0.line_items)).account_id
         if target.id == pending_id or target.id == t0.account_id:
             raise HTTPException(422, "Select the appropriate target account.")
         if data["date"] < t0.transaction_date.date():
             raise HTTPException(422, "The classification date cannot precede the original transaction.")
+        outgoing = t0.credited
+        if (data.get("document_id") is None) != (data.get("clear_amount") is None):
+            raise HTTPException(422, "Select a document and a clearing amount together, or leave both blank.")
         t = post_journal(s, dict(date=data["date"], description=data["description"],
-            reference=f"CLASSIFY-{id}", lines=[dict(account_id=pending_id, debit=t0.amount, credit=0),
-                dict(account_id=target.id, debit=0, credit=t0.amount)]))
+            reference=f"CLASSIFY-{id}", lines=[dict(account_id=pending_id, debit=0 if outgoing else t0.amount, credit=t0.amount if outgoing else 0),
+                dict(account_id=target.id, debit=t0.amount if outgoing else 0, credit=0 if outgoing else t0.amount)]))
+        if data.get("document_id") is not None:
+            link_document(s, t, data["document_id"], data["clear_amount"], data["date"])
+            audit_event(s.connection(), user_id, "assign", dict(payment_id=t.id, document_id=data["document_id"], amount=str(data["clear_amount"])))
         s.connection().execute(update(operations).where(operations.c.id == original["id"]).values(resolved=True))
         return finish(s, op, t, user_id)
 
