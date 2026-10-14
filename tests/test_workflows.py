@@ -271,6 +271,88 @@ def test_clear_existing_receipt_excess_then_clear_from_suspense(client):
     balances = {x["name"]: Decimal(x["balance"]) for x in c.get("/api/accounts").json()}
     assert balances["Bank"] == 200 and balances["Suspense"] == balances["Demo Customer"] == 0
 
+def test_grouped_banking_query_detail_export_and_legacy_replay(client):
+    c, a = client, account_ids(client)
+    invoice = post(c, "/api/sales/invoices", dict(date=DAY, description="Invoice", account_id=a["Demo Customer"],
+        lines=[dict(description="Line", account_id=a["Service Revenue"], amount="150")]))
+    assert invoice.status_code == 200, invoice.text
+    invoice = invoice.json()
+    assert c.get("/api/banking/open-documents", params={"account_id": a["Demo Customer"]}).json()[0]["number"] == invoice["number"]
+    key = str(uuid.uuid4())
+    payload = dict(bank_id=a["Bank"], amount="200", date=DAY, description="=SUM(1,2)", reference="GROUP-TEST")
+    entry = post(c, "/api/banking/transactions", payload, key)
+    assert entry.status_code == 200, entry.text
+    entry = entry.json()
+    assert post(c, "/api/bank-transactions", payload, key).json()["id"] == entry["id"]
+    pending = c.get("/api/banking/transactions", params={"status": "pending", "limit": 1}).json()
+    assert pending["total"] == 1 and pending["items"][0]["status"] == "unclassified"
+    assert Decimal(pending["items"][0]["money_in"]) == 200
+    assert c.get("/api/banking/transactions", params={"offset": 1}).json()["items"] == []
+    source = c.get("/api/banking/clearing-sources", params={"side": "ar"}).json()[0]
+    assert source["source_id"] == entry["id"] and source["from_suspense"]
+    r = post(c, f'/api/banking/transactions/{entry["id"]}/classifications', dict(date=DAY, description="Invoice allocation",
+        allocations=[dict(account_id=a["Demo Customer"], amount="150", document_id=invoice["id"])]))
+    assert r.status_code == 200, r.text
+    partial = c.get("/api/banking/transactions", params={"status": "partially_classified", "search": "GROUP-TEST"}).json()
+    assert partial["total"] == 1 and Decimal(partial["items"][0]["suspense_remaining"]) == 50
+    assert c.get("/api/banking/transactions", params={"status": "classified"}).json()["total"] == 0
+    detail = c.get(f'/api/banking/transactions/{entry["id"]}').json()
+    assert len(detail["classifications"]) == 1
+    assert detail["classifications"][0]["clearings"][0]["document_number"] == invoice["number"]
+    assert sum(Decimal(x["debit"]) for x in detail["ledger"]) == sum(Decimal(x["credit"]) for x in detail["ledger"]) == 200
+    assert c.get(f'/api/banking/transactions/{entry["id"]}/classifications').json() == detail["classifications"]
+    exported = c.get("/api/banking/transactions/export", params={"search": "GROUP-TEST"})
+    assert exported.status_code == 200 and "'=SUM(1,2)" in exported.text
+    assert c.get("/api/banking/transactions/export", params={"search": "absent"}).text.count("\n") == 1
+    assert c.get("/api/banking/open-documents", params={"account_id": a["Demo Customer"]}).json() == []
+    assert Decimal(c.get("/api/banking/accounts").json()[0]["balance"]) == 200
+    assert Decimal(c.get("/api/banking/suspense").json()[0]["available"]) == 50
+    assert c.get("/api/banking/transactions", params={"bank_id": a["Demo Customer"]}).status_code == 422
+    assert c.get("/api/banking/transactions", params={"start": END, "end": START}).status_code == 422
+    assert c.get("/api/banking/transactions", params={"limit": 501}).status_code == 422
+    assert c.get(f'/api/banking/transactions/{invoice["id"]}').status_code == 404
+    assert c.get("/api/banking/open-documents", params={"account_id": a["Bank"]}).status_code == 422
+
+def test_api_groups_contract_and_clear_business_area_guards(client):
+    c, a = client, account_ids(client)
+    schema = c.get("/openapi.json").json()
+    assert {"Journal", "Sales", "Purchases", "Banking", "Reports"}.issubset({t["name"] for t in schema["tags"]})
+    for operations in schema["paths"].values():
+        for method, operation in operations.items():
+            if method in ("get", "post", "patch", "delete", "put"):
+                assert operation["tags"] and "default" not in operation["tags"]
+            if method in ("post", "patch", "delete", "put"):
+                assert any(p["name"] == "X-Requested-With" for p in operation["parameters"])
+    assert schema["paths"]["/api/bank-transactions"]["post"]["deprecated"]
+    assert schema["paths"]["/api/banking/transactions"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith("BankMovementPage")
+    bill = post(c, "/api/purchases/bills", dict(date=DAY, description="Bill", account_id=a["Demo Supplier"],
+        lines=[dict(description="Cost", account_id=a["Office Expenses"], amount="50")]))
+    assert bill.status_code == 200, bill.text
+    outgoing = post(c, "/api/banking/transactions", dict(bank_id=a["Bank"], amount="75", direction="out", date=DAY, description="Unknown payment")).json()
+    payload = dict(payment_id=outgoing["id"], document_id=bill.json()["id"], amount="50", date=DAY, from_suspense=True)
+    assert post(c, "/api/sales/clearings", payload).status_code == 422
+    assert post(c, "/api/purchases/clearings", payload).status_code == 200
+    suspense = c.get("/api/banking/suspense", params={"side": "ap"}).json()[0]
+    assert Decimal(suspense["available"]) == 25
+    exported = c.get("/api/banking/transactions/export").text
+    assert "-25" in exported and "'-25" not in exported
+    assert c.get("/api/journal/entries").json() == []
+    journal = post(c, "/api/journal/entries", dict(date=DAY, description="Capital", lines=[
+        dict(account_id=a["Bank"], debit="10"), dict(account_id=a["Owner Capital"], credit="10")]))
+    assert journal.status_code == 200, journal.text
+    assert len(c.get("/api/journal/entries").json()) == 1
+
+def test_grouped_banking_viewer_permissions(client):
+    c = client
+    post(c, "/api/admin/users", dict(email="bankviewer@example.com", password="ViewerPassword-123", role="Viewer"))
+    c.post("/api/auth/logout", headers={"X-Requested-With": "SimpleBooks"})
+    assert c.post("/api/auth/login", data={"username": "bankviewer@example.com", "password": "ViewerPassword-123"}, headers={"X-Requested-With": "SimpleBooks"}).status_code == 204
+    assert c.get("/api/banking/accounts").status_code == 200
+    assert c.get("/api/banking/transactions").status_code == 200
+    assert c.get("/api/banking/suspense").status_code == 200
+    assert post(c, "/api/banking/transactions", dict(bank_id=4, amount="10", date=DAY, description="Denied")).status_code == 403
+    assert c.post("/api/banking/transactions", json=dict(bank_id=4, amount="10", date=DAY, description="No header")).status_code == 403
+
 def test_suspense_idempotency_and_reclassification(client):
     c = client
     a = account_ids(c)

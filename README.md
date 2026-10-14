@@ -105,3 +105,75 @@ GitHub Actions 使用 PostgreSQL 16 验证未知入账/分类、部分核销与�
 ## 上游及许可
 
 来源和模板改动说明见 NOTICE.md。MIT 许可见 LICENSE。FastAPI Users 目前处于维护模式；本项目只使用其现有用户管理和会话能力。
+
+
+## 分组 API（源码版本 0.2.0）
+
+Swagger `/docs` 与 OpenAPI `/openapi.json` 按 Auth、Company、Accounts、Journal、Sales、Purchases、Banking、Reports、Administration、System 分组。旧接口归入 Compatibility 并标记 deprecated，但继续可用。Cookie 登录、三个角色及原有原子记账事务保持一致。
+
+分组入口：
+
+- Journal：`GET/POST /api/journal/entries`、`POST /api/journal/entries/{id}/reverse`。
+- Sales：`GET/POST /api/sales/invoices`、`POST /api/sales/clearings`。
+- Purchases：`GET/POST /api/purchases/bills`、`POST /api/purchases/clearings`。
+- Reports：`GET /api/reports/{name}`、`GET /api/export/reports/{name}`。
+
+Sales 的新建单据请求只允许 invoice；Purchases 只允许 bill；kind 可以省略。收付款仍在 Banking 录入。
+
+### Banking 接口
+
+| 方法 | 地址 | 用途 |
+|---|---|---|
+| GET | `/api/banking/accounts` | Bank / petty cash 科目及余额；可传 as_of 日期 |
+| GET | `/api/banking/transactions` | 银行流水，筛选、搜索、分页 |
+| POST | `/api/banking/transactions` | 收付款，支持未知暂挂、已知分类及即时 Clear |
+| GET | `/api/banking/transactions/{id}` | 原流水、原始借贷、分类分录、关联的核销单据 |
+| GET | `/api/banking/transactions/{id}/classifications` | 分类和转回 Suspense 的分录明细 |
+| POST | `/api/banking/transactions/{id}/classifications` | 对银行流水的剩余 Suspense 进行多行分类，可同时 Clear |
+| GET | `/api/banking/open-documents?account_id=...` | 指定客户 A/R 的未结清发票，或供应商 A/P 的未结清账单 |
+| GET | `/api/banking/clearing-sources?side=ar` | 可用 A/R credit 或 A/P debit，以及 Suspense 来源；side 可省略或填 ap |
+| GET | `/api/banking/suspense?side=ar` | 只有实际剩余暂挂金额的来源；包含非银行分录的暂挂金额 |
+| POST | `/api/banking/suspense/{id}/classifications` | 分类剩余暂挂金额，包含非银行来源 |
+| POST | `/api/banking/clearings` | 从已有分录或 Suspense 核销发票／账单 |
+| GET | `/api/banking/transactions/export` | 按相同筛选条件导出全部匹配流水，不受分页限制 |
+
+流水查询参数：bank_id、start、end、search、status、limit（1–500，默认 100）、offset（默认 0）。日期筛选针对银行入账日期；状态反映当前分类状态。status 可用 unclassified、partially_classified、classified；pending 同时包含前两者。响应为 `{items, total, limit, offset}`。每条 items 是某笔交易在某个银行科目的实际净变动，具有 entry_key、money_in、money_out、suspense_remaining、status；分类分录不会被重复算作银行流水。
+
+详情的 classifications 数组包含分类分录的 ledger 和 clearings；原记录的 clearings 包含直接核销关系。clearings 中的 document_type 区分发票、账单和用于处理多余金额的 Journal。金额字段为十进制字符串。
+
+写入需先登录，并传 `X-Requested-With: SimpleBooks`；过账、分类和核销还需 `Idempotency-Key`（8–100 字符）。Swagger 已显式显示这两个请求头。Viewer 可查询和导出，不能写入。不要删除或覆盖已过账的银行记录。
+
+多行分类请求示例（id 使用查询得到的实际科目和单据 ID）：
+
+```json
+{
+  "date": "2026-10-13",
+  "description": "Split bank receipt",
+  "allocations": [
+    {"account_id": 9, "amount": "150.00", "document_id": 11, "clear_amount": "150.00"},
+    {"account_id": 6, "amount": "50.00"}
+  ]
+}
+```
+
+若这笔银行款为 250，则上述分类后仍有 50 在 Suspense。全部行在同一事务内处理：错误的客户／供应商匹配、不可用金额或非法分类会整批回滚。
+
+从 Suspense 核销，在 `/api/sales/clearings`、`/api/purchases/clearings` 或 `/api/banking/clearings` 传：
+
+```json
+{
+  "payment_id": 12,
+  "document_id": 11,
+  "amount": "100.00",
+  "date": "2026-10-13",
+  "from_suspense": true
+}
+```
+
+payment_id 为来源记录 ID，不是 Suspense 科目 ID。`from_suspense=false` 使用已有 A/R credit 或 A/P debit。少收只核销实际金额，发票余款留在 A/R；多收的未匹配金额留在 Suspense。直接处理 Suspense 时会追加必要的重分类分录并匹配单据，银行余额不会再次增加。
+
+### LedgerSMB API 参考核对（2026-10-13）
+
+依据 [官方 API 章节](https://book.ledgersmb.org/dev/split-book/cha-customization-web-service-api.html)、[OpenAPI 定义](https://github.com/ledgersmb/LedgerSMB/blob/master/doc/openapi/API.yaml) 和 [实际路由源码](https://github.com/ledgersmb/LedgerSMB/tree/master/lib/LedgerSMB/Routes/ERP/API) 核对：公开 API 挂在 erp/api/v0，仍未稳定。定义主要覆盖国家／语言、行业和业务类型、GIFI、商品组／价格组／仓库、菜单，以及标记 Experimental 的发票和订单。源码还提供科目、当前会话和模板内容接口。Contacts 模块中的已核实接口是业务类型和行业代码，不应误称为完整客户／供应商 CRUD。
+
+在检查的官方 API 定义和该路由目录中，没有独立的银行流水、银行分类、收付款核销或银行对账 REST 路由。这不等于 LedgerSMB 软件没有银行功能；传统网页功能和公开 REST API 的覆盖范围不同。本项目仅参考资源分组与接口语义，没有复制其 GPL 源码。

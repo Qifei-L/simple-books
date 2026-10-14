@@ -91,14 +91,14 @@ export function Transactions({ section = "journal" }: { section?: TransactionSec
         { title: "Status", render: (_, t) => ["invoice", "bill"].includes(t.kind) ? <Tag color={Number(t.remaining) === 0 ? "green" : Number(t.remaining) < Number(t.amount) ? "blue" : "orange"}>{Number(t.remaining) === 0 ? "Cleared" : Number(t.remaining) < Number(t.amount) ? "Partially Cleared" : "Open"}</Tag> : t.settlement_side ? <Tag>{Number(t.available) === 0 ? "Fully Applied" : "Available"}</Tag> : null },
         { title: "", render: (_, t) => <Button type="link" onClick={() => setSelected(t)}>Details</Button> }]} /></Card>
     <Drawer title={selected?.number} open={!!selected} onClose={() => setSelected(undefined)} width={620}
-      extra={selected?.kind === "journal" && !selected.reversed && writable && <Button danger onClick={() => Modal.confirm({ title: "Reverse this journal entry?", content: "A reversing entry will be added. The original record will be retained.", onOk: async () => { await api(`journals/${selected.id}/reverse`, { method: "POST", headers: { "Idempotency-Key": `reverse-journal-${selected.id}` }, body: JSON.stringify({ date: today(), description: `Reverse ${selected.number}` }) }); setSelected(undefined); data.refresh(); accounts.refresh(); } })}>Reverse</Button>}>
+      extra={selected?.kind === "journal" && !selected.reversed && writable && <Button danger onClick={() => Modal.confirm({ title: "Reverse this journal entry?", content: "A reversing entry will be added. The original record will be retained.", onOk: async () => { await api(`journal/entries/${selected.id}/reverse`, { method: "POST", headers: { "Idempotency-Key": `reverse-journal-${selected.id}` }, body: JSON.stringify({ date: today(), description: `Reverse ${selected.number}` }) }); setSelected(undefined); data.refresh(); accounts.refresh(); } })}>Reverse</Button>}>
       {selected && <><Descriptions column={1} items={[{ key: "date", label: "Date", children: selected.date }, { key: "description", label: "Description", children: selected.description }, { key: "account", label: "Main account", children: selected.account }, { key: "due", label: "Due date", children: selected.due_date || "—" }]} />
         <Table rowKey="account_id" dataSource={selected.lines} pagination={false} columns={[{ title: "Account", dataIndex: "account" }, { title: "Description", dataIndex: "description" }, { title: "Unit price", dataIndex: "amount", render: money }, { title: "Quantity", dataIndex: "quantity" }]} /></>}
     </Drawer>
     <Modal title="Create and Post" open={open} width={800} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={send.busy}>
       <Form name={`${section}-create`} form={form} layout="vertical" initialValues={{ date: today(), kind: config.create[0], lines: [{ quantity: 1 }] }} onFinish={v => {
-        if (kind === "journal") send.submit("journals", { date: v.date, description: v.description, reference: v.reference || "", lines: [{ account_id: v.debit_id, debit: String(v.total) }, { account_id: v.credit_id, credit: String(v.total) }] });
-        else send.submit("documents", { ...v, reference: v.reference || "", lines: v.lines.map((l: any) => ({ ...l, amount: String(l.amount), quantity: String(l.quantity || 1) })) });
+        if (kind === "journal") send.submit("journal/entries", { date: v.date, description: v.description, reference: v.reference || "", lines: [{ account_id: v.debit_id, debit: String(v.total) }, { account_id: v.credit_id, credit: String(v.total) }] });
+        else send.submit(kind === "invoice" ? "sales/invoices" : kind === "bill" ? "purchases/bills" : "documents", { ...v, reference: v.reference || "", lines: v.lines.map((l: any) => ({ ...l, amount: String(l.amount), quantity: String(l.quantity || 1) })) });
       }}>
         <Form.Item name="kind" label="Type"><Select onChange={v => { form.resetFields(); form.setFieldsValue({ kind: v, date: today(), lines: [{ quantity: 1 }] }); setKind(v); }} options={config.create.map(value => ({ value, label: labels[value] }))} /></Form.Item>
         <Row gutter={16}><Col span={12}><DateField /></Col><Col span={12}><Form.Item name="reference" label="Reference"><Input /></Form.Item></Col></Row>
@@ -116,7 +116,7 @@ export function Transactions({ section = "journal" }: { section?: TransactionSec
         </>}
       </Form></Modal>
     <Modal title={clearTitle} open={assignOpen} onCancel={() => setAssignOpen(false)} onOk={() => assignForm.submit()} confirmLoading={allocate.busy}>
-      <Form name={`${section}-clear`} form={assignForm} layout="vertical" initialValues={{ date: today() }} onFinish={v => allocate.submit("assignments", { ...v, payment_id: clearingSource.id, from_suspense: fromSuspense, amount: String(v.amount) })}>
+      <Form name={`${section}-clear`} form={assignForm} layout="vertical" initialValues={{ date: today() }} onFinish={v => allocate.submit(`${section}/clearings`, { ...v, payment_id: clearingSource.id, from_suspense: fromSuspense, amount: String(v.amount) })}>
         <Alert type="info" message="Match an existing entry or Suspense amount to a document. A Suspense selection is reclassified as part of clearing. Unmatched excess stays in Suspense." style={{ marginBottom: 16 }} />
         <Form.Item name="payment_id" label="Available entry / Suspense" rules={[{ required: true }]}><Select onChange={() => assignForm.setFieldsValue({ document_id: undefined, amount: undefined })} options={data.rows.flatMap(t => [
           ...(t.settlement_side === side && Number(t.available) > 0 ? [{ value: `entry:${t.id}`, label: `${t.number} · ${t.account} · Available ${money(t.available)}` }] : []),
@@ -197,7 +197,7 @@ export function Banking() {
       { title: "", render: (_, t) => t.pending && user.role !== "Viewer" && <Button onClick={() => { resolveForm.resetFields(); resolveForm.setFieldsValue({ date: today(), description: t.description, allocations: [{ amount: Math.abs(Number(t.suspense_remaining)) }] }); setTarget(t); }}>Classify</Button> }
     ]} /></Card>
     <Modal title="New Bank Transaction" okText={entryDocument ? "Save & Clear" : "Save"} open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={create.busy}>
-      <Form name="bank-entry" form={form} layout="vertical" onFinish={v => create.submit("bank-transactions", { ...payload(v), account_id: v.account_id ?? null })}>
+      <Form name="bank-entry" form={form} layout="vertical" onFinish={v => create.submit("banking/transactions", { ...payload(v), account_id: v.account_id ?? null })}>
         <Form.Item name="bank_id" label="Bank / petty cash account" rules={[{ required: true }]}><AccountsSelect accounts={banks} /></Form.Item>
         <Form.Item name="direction" label="Direction" rules={[{ required: true }]}><Select onChange={() => form.setFieldsValue({ document_id: undefined, clear_amount: undefined })} options={[{ value: "in", label: "Money in" }, { value: "out", label: "Money out" }]} /></Form.Item>
         <DateField /><Form.Item name="description" label="Description" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="reference" label="Reference"><Input /></Form.Item>
@@ -207,7 +207,7 @@ export function Banking() {
       </Form>
     </Modal>
     <Modal title={`Classify Transaction · ${money(suspenseBudget)} USD`} okText={classifyDocument ? "Classify & Clear" : "Classify"} open={!!target} onCancel={() => setTarget(undefined)} onOk={() => resolveForm.submit()} confirmLoading={resolve.busy}>
-      <Form name="bank-classify" form={resolveForm} layout="vertical" onFinish={v => resolve.submit(`suspense/${target.id}/resolve`, { ...v, allocations: v.allocations.map((line: any) => ({ ...line, amount: String(line.amount), ...(line.document_id ? { clear_amount: String(line.clear_amount || line.amount) } : { document_id: null, clear_amount: null }) })) })}>
+      <Form name="bank-classify" form={resolveForm} layout="vertical" onFinish={v => resolve.submit(`banking/transactions/${target.id}/classifications`, { ...v, allocations: v.allocations.map((line: any) => ({ ...line, amount: String(line.amount), ...(line.document_id ? { clear_amount: String(line.clear_amount || line.amount) } : { document_id: null, clear_amount: null }) })) })}>
         <Alert type="info" message="Reclassify the existing bank entry. You can clear a matching invoice or bill now, or leave it for later. The bank amount is not posted again." style={{ marginBottom: 16 }} />
         <DateField /><Form.Item name="description" label="Reason for classification" rules={[{ required: true }]}><Input /></Form.Item>
         <Form.List name="allocations" rules={[{ validator: async (_, lines) => { if (!lines?.length) throw new Error("Add at least one classification line."); } }]}>{(fields, { add, remove }, { errors }) => <>
